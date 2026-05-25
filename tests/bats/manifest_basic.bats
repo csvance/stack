@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 
     load_lib common.sh
     load_lib manifest.sh
@@ -20,19 +20,35 @@ setup() {
 }
 
 @test "manifest::load rejects a missing required field" {
-    jq 'del(.stack_prefix)' stack-manifest.json > tmp.json
-    mv tmp.json stack-manifest.json
+    jq 'del(.stack_prefix)' "$STACK_MANIFEST" > tmp.json
+    mv tmp.json "$STACK_MANIFEST"
     run manifest::load
     assert_failure
     assert_output_contains "stack_prefix"
 }
 
-@test "manifest::load rejects branches out of order" {
-    jq '.branches |= reverse' stack-manifest.json > tmp.json
-    mv tmp.json stack-manifest.json
+@test "manifest::load accepts non-contiguous order values (after a land)" {
+    # Simulate a stack where feat-1 has been landed: orders 2, 3, 4 remain.
+    jq '.branches |= map(select(.order != 1))' "$STACK_MANIFEST" > tmp.json
+    mv tmp.json "$STACK_MANIFEST"
+    run manifest::load
+    assert_success
+}
+
+@test "manifest::load rejects duplicate order values" {
+    jq '.branches[1].order = 1' "$STACK_MANIFEST" > tmp.json
+    mv tmp.json "$STACK_MANIFEST"
     run manifest::load
     assert_failure
-    assert_output_contains "order"
+    assert_output_contains "unique"
+}
+
+@test "manifest::load rejects non-positive order values" {
+    jq '.branches[0].order = 0' "$STACK_MANIFEST" > tmp.json
+    mv tmp.json "$STACK_MANIFEST"
+    run manifest::load
+    assert_failure
+    assert_output_contains "positive integer"
 }
 
 @test "manifest::branches_in_order returns each branch with TSV fields" {
@@ -53,28 +69,28 @@ setup() {
 
 @test "manifest::record_update writes the last_update block" {
     manifest::record_update "feat-2" "squash" '["aaa","bbb"]'
-    run jq -r '.last_update.target_branch' stack-manifest.json
+    run jq -r '.last_update.target_branch' "$STACK_MANIFEST"
     [[ "$output" == "feat-2" ]]
-    run jq -r '.last_update.integration_strategy' stack-manifest.json
+    run jq -r '.last_update.integration_strategy' "$STACK_MANIFEST"
     [[ "$output" == "squash" ]]
-    run jq -r '.last_update.integrated_commit_shas | length' stack-manifest.json
+    run jq -r '.last_update.integrated_commit_shas | length' "$STACK_MANIFEST"
     [[ "$output" == 2 ]]
 }
 
 @test "manifest::set_pr populates pr_id and pr_url for a single branch" {
     manifest::set_pr "feat-3" "42" "https://example/PR/42"
-    run jq -r '.branches[] | select(.name=="feat-3") | .pr_id' stack-manifest.json
+    run jq -r '.branches[] | select(.name=="feat-3") | .pr_id' "$STACK_MANIFEST"
     [[ "$output" == "42" ]]
-    run jq -r '.branches[] | select(.name=="feat-1") | .pr_id // ""' stack-manifest.json
+    run jq -r '.branches[] | select(.name=="feat-1") | .pr_id // ""' "$STACK_MANIFEST"
     [[ "$output" == "" ]]
 }
 
 @test "manifest::record_verification preserves original_tree and writes new fields" {
     local original_tree
-    original_tree="$(jq -r '.verification.original_tree' stack-manifest.json)"
+    original_tree="$(jq -r '.verification.original_tree' "$STACK_MANIFEST")"
     manifest::record_verification "abcd1234"
-    run jq -r '.verification.original_tree' stack-manifest.json
+    run jq -r '.verification.original_tree' "$STACK_MANIFEST"
     [[ "$output" == "$original_tree" ]]
-    run jq -r '.verification.current_stack_tip_tree' stack-manifest.json
+    run jq -r '.verification.current_stack_tip_tree' "$STACK_MANIFEST"
     [[ "$output" == "abcd1234" ]]
 }

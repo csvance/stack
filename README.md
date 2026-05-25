@@ -49,9 +49,16 @@ All subcommands accept these global flags:
 - `--yes`, `-y` skip confirmation prompts (do not skip choice prompts)
 - `--dry-run`, `-n` print what would happen without making changes
 - `--verbose`, `-v` verbose logging
-- `--structured` machine-readable one-fact-per-line output
-- `--manifest <path>` use a manifest at a non-default path
+- `--stack <prefix>` operate on the stack with this `stack_prefix` (default:
+  pick the stack whose branches contain the currently checked-out branch)
 
+Each repository can hold multiple stacks at once. Manifests live under
+`.git/stack/manifests/<stack_prefix>.json`. A legacy `stack-manifest.json`
+at the repo root is migrated to the new location on first invocation.
+
+- **`stack list`** Read-only. Enumerate all stacks in the repo, one row per
+  `stack_prefix` with branch count and `base_ref`. A `*` marker indicates
+  the stack containing the current branch.
 - **`stack status`** Read-only. Prints the manifest summary, reports drift
   between the manifest and local branches (see "Drift detection" below),
   and surfaces any cached PR status. Pass `--verbose` to also render the
@@ -67,11 +74,13 @@ All subcommands accept these global flags:
   rebuilt result is shown and confirmed before the manifest is written.
 - **`stack push`** Force-with-lease every branch and create or update the
   corresponding Azure DevOps PRs. Each PR targets the previous branch in
-  the stack (the bottom targets `base_ref`). Title and description come
-  from the commit; the body includes a "Part X of Y in stack" header with
-  cross-links to every sibling PR (two passes: pass 1 creates with
-  placeholder links, pass 2 refreshes descriptions with the actual IDs).
-  Handles abandoned and merged PRs interactively.
+  the stack (the bottom targets `base_ref`). The root PR (the original
+  bottom of the stack, recorded once on first push and preserved across
+  `stack land`) carries the canonical stack index in its description.
+  Every non-root PR carries a single back-link to the root PR. Titles are
+  stable as `[Part N] <commit subject>`; appending or landing branches
+  does not require rewriting other titles. Handles abandoned and merged
+  PRs interactively.
 - **`stack sync`** Fetches origin and rebases the entire stack onto the
   moved base ref via a single `git branchless move`. Verification cherry-
   picks the old commits onto the new base in a throwaway worktree and
@@ -79,8 +88,11 @@ All subcommands accept these global flags:
 - **`stack land`** Detects whether the bottom PR has been merged (via
   Azure DevOps or `git merge-base --is-ancestor`), drops the bottom from
   the manifest, deletes its local ref, rebases the rest onto the new base,
-  and retargets the new bottom's PR. The remaining branches keep their
-  original names; the manifest's `order` field is renumbered 1..N-1.
+  and retargets the new bottom's PR. The remaining branches keep both
+  their names and their original `order` values; gaps in the order sequence
+  after a land are intentional and a stable identifier matching the branch
+  name suffix. When the merged bottom was the only branch in the stack,
+  the manifest file is removed entirely.
 
 ## Drift detection
 
@@ -88,18 +100,23 @@ All subcommands accept these global flags:
 proceed when most drift classes are present. Recovery is `stack abort` or
 manual reset to manifest state.
 
+Preconditions (reported separately from drift; block state-changing
+subcommands):
+
+- detached HEAD (HEAD is not on a branch)
+- dirty working tree (uncommitted changes or in-progress merge/rebase)
+- invalid manifest (bad JSON, missing required fields)
+
+Drift classes:
+
 | Class | Meaning |
 |---|---|
-| `MANIFEST_INVALID` | bad JSON, version != 1, or branches out of order |
 | `MISSING_BRANCH` | manifest names a branch with no local ref |
 | `BRANCH_MOVED` | local SHA differs from recorded `commit_sha` |
 | `PARENT_DRIFT` | actual parent commit != recorded parent's SHA |
 | `BASE_MOVED` | resolved `base_ref` != recorded `base_branch` |
-| `DETACHED_HEAD` | HEAD is not on a branch |
-| `DIRTY_WORKTREE` | uncommitted changes or in-progress merge/rebase |
 | `UNCOMMITTED_AHEAD` | current branch has commits beyond recorded (input to `stack update`) |
 | `PR_MERGED_BOTTOM` | bottom PR is `completed` (input to `stack land`) |
-| `PR_STATUS_STALE` | cache more than 24h old |
 
 ## Backup snapshots
 
@@ -122,8 +139,9 @@ following backward-compatible fields the first time it touches a manifest:
 - optional top-level `base_ref` (e.g. `"origin/master"`) tracked ref for
   `sync` / `land`
 - top-level `last_update`
+- top-level `root_pr_id` / `root_pr_url` (set once on first `stack push`;
+  preserved across `stack land`)
 - per-branch `pr_id` / `pr_url`
-- top-level `pr_status_cache`
 - top-level `verification.current_stack_tip_tree` /
   `verification.last_verified_at`
 

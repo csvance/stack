@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 
     # Set up a bare repo as origin and push initial state.
     ORIGIN="$BATS_TEST_TMPDIR/origin.git"
@@ -16,8 +16,8 @@ setup() {
     git push --quiet origin main feat-1 feat-2 feat-3 feat-4
 
     # Add base_ref to manifest.
-    jq '. + {base_ref: "origin/main"}' stack-manifest.json > tmp.json
-    mv tmp.json stack-manifest.json
+    jq '. + {base_ref: "origin/main"}' "$STACK_MANIFEST" > tmp.json
+    mv tmp.json "$STACK_MANIFEST"
 }
 
 @test "sync is a no-op when origin/main has not moved" {
@@ -42,11 +42,11 @@ setup() {
         git push --quiet origin main
     )
 
-    local old_base; old_base="$(jq -r '.base_branch' stack-manifest.json)"
+    local old_base; old_base="$(jq -r '.base_branch' "$STACK_MANIFEST")"
     run "$STACK_HOME/bin/stack" sync --yes
     assert_success
 
-    local new_base; new_base="$(jq -r '.base_branch' stack-manifest.json)"
+    local new_base; new_base="$(jq -r '.base_branch' "$STACK_MANIFEST")"
     [[ "$new_base" != "$old_base" ]]
 
     # All four stack branches should now descend from the new base.

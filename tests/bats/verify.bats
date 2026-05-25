@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 
     load_lib common.sh
     load_lib git_helpers.sh
@@ -18,7 +18,7 @@ setup() {
 
 @test "compute_reference_tip on the recorded SHAs reproduces the stack tip tree" {
     local base
-    base="$(jq -r '.base_branch' stack-manifest.json)"
+    base="$(jq -r '.base_branch' "$STACK_MANIFEST")"
     local shas
     shas=()
     while IFS=$'\t' read -r order name sha parent; do

@@ -8,8 +8,6 @@ IFS=$'\n\t'
 
 # shellcheck source=../lib/common.sh
 source "$STACK_HOME/lib/common.sh"
-# shellcheck source=../lib/structured.sh
-source "$STACK_HOME/lib/structured.sh"
 # shellcheck source=../lib/git_helpers.sh
 source "$STACK_HOME/lib/git_helpers.sh"
 # shellcheck source=../lib/manifest.sh
@@ -55,6 +53,7 @@ done
 
 stack::parse_global_flags "${remaining[@]:-}"
 stack::preflight_repo
+stack::resolve_manifest
 branchless::preflight
 manifest::load
 

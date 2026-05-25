@@ -6,7 +6,7 @@
 #   - a `main` base branch holding one commit touching a.txt, b.txt, c.txt, d.txt
 #   - four stack branches feat-1..feat-4, each adding one commit on top of the
 #     previous, each touching one of those files
-#   - a stack-manifest.json describing the stack at repo root
+#   - a manifest at .git/stack/manifests/feat.json describing the stack
 #
 # Initializes git-branchless. Skips the test if branchless is unavailable.
 fixture::make_repo_with_stack() {
@@ -51,6 +51,7 @@ fixture::make_repo_with_stack() {
         # Build manifest.
         local stack_prefix="feat"
         local stack_tip_tree; stack_tip_tree="$(git rev-parse "feat-4^{tree}")"
+        mkdir -p .git/stack/manifests
         jq -n \
             --arg created "2026-05-24T00:00:00Z" \
             --arg base "$base_sha" \
@@ -96,7 +97,7 @@ fixture::make_repo_with_stack() {
                     original_tree: $tip_tree,
                     stack_tip_tree: $tip_tree
                 }
-            }' > stack-manifest.json
+            }' > .git/stack/manifests/feat.json
 
         git switch main --quiet
     )

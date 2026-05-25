@@ -96,6 +96,11 @@ case "$sub" in
         ;;
     repos)
         case "$arg1" in
+            show)
+                # az repos show: auth/reachability probe. Mock always succeeds.
+                printf '{"id":"mock-repo","name":"%s"}\n' "${flags[repo]:-mock}"
+                exit 0
+                ;;
             pr)
                 case "$arg2" in
                     create)

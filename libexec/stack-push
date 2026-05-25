@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # stack push: force-with-lease each stack branch and create/update DevOps PRs.
+# Centralized model: the root PR (set once on first push, preserved across
+# stack land) holds the canonical Stack: index; non-root PRs carry only a
+# back-link to the root.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -8,8 +11,6 @@ IFS=$'\n\t'
 
 # shellcheck source=../lib/common.sh
 source "$STACK_HOME/lib/common.sh"
-# shellcheck source=../lib/structured.sh
-source "$STACK_HOME/lib/structured.sh"
 # shellcheck source=../lib/git_helpers.sh
 source "$STACK_HOME/lib/git_helpers.sh"
 # shellcheck source=../lib/manifest.sh
@@ -27,7 +28,9 @@ Usage: stack push
 
 Force-with-lease every stack branch to origin and create or update an Azure
 DevOps PR per branch. Each PR targets the previous branch in the stack; the
-bottom PR targets the manifest's base_ref (or base_branch).
+bottom PR targets the manifest's base_ref. The root PR (set once on first
+push) carries the canonical stack index in its description; non-root PRs
+carry only a back-link to the root PR.
 EOF
 }
 
@@ -42,30 +45,45 @@ done
 
 stack::parse_global_flags "${remaining[@]:-}"
 stack::preflight_repo
+stack::resolve_manifest
 branchless::preflight
 manifest::load
 az::preflight
 az::resolve_repo
 az::preflight_auth
 
-# Determine target for the bottom branch.
 base_ref="$(manifest::base_ref)"
 if [[ -z "$base_ref" ]]; then
-    stack::die "manifest has no base_ref; set one with: jq '.base_ref = \"<branch>\"' stack-manifest.json (e.g. \"master\")"
+    stack::die "manifest has no base_ref; set one with: jq '.base_ref = \"<branch>\"' \"\$STACK_MANIFEST\" (e.g. \"master\")"
 fi
-
-# Strip "origin/" prefix if present; DevOps PR target is just the branch name.
 target_for_bottom="${base_ref#origin/}"
 
 stack_prefix="$(manifest::get '.stack_prefix')"
-total="$(jq -r '.branches | length' "$(manifest::path)")"
 
-# Collect plan: <order>\t<name>\t<commit_sha>\t<target>
+# Root identity. root_pr_id is set on first push and preserved across lands.
+root_pr_id="$(manifest::root_pr_id)"
+root_pr_url=""
+
+# Designated root branch name. If root_pr_id is already set, find the branch
+# in the current manifest whose pr_id matches (empty if the root has been
+# landed and removed from branches[]). If root_pr_id is unset, the lowest-
+# order branch in the current manifest is the designated root for this push.
+if [[ -n "$root_pr_id" ]]; then
+    designated_root_name="$(jq -r --arg id "$root_pr_id" '.branches[] | select((.pr_id // "") == $id) | .name' "$(manifest::path)")"
+else
+    designated_root_name="$(jq -r '.branches | sort_by(.order) | .[0].name' "$(manifest::path)")"
+fi
+
+# Plan: <order>\t<name>\t<commit_sha>\t<target>
+# Each PR targets the previous branch in the stack; the lowest-order branch
+# in the current manifest targets the base_ref.
 plan_lines=()
 prev_name=''
+first=1
 while IFS=$'\t' read -r order name commit_sha parent; do
-    if (( order == 1 )); then
+    if (( first )); then
         target="$target_for_bottom"
+        first=0
     else
         target="$prev_name"
     fi
@@ -73,9 +91,13 @@ while IFS=$'\t' read -r order name commit_sha parent; do
     prev_name="$name"
 done < <(manifest::branches_in_order)
 
-# Print plan + confirm.
 {
     echo "remote:  $AZ_ORG_URL / $AZ_PROJECT / $AZ_REPO"
+    if [[ -n "$root_pr_id" ]]; then
+        echo "root PR: #$root_pr_id (preserved)"
+    else
+        echo "root PR: (will be set to $designated_root_name's PR on first creation)"
+    fi
     echo "branches (order  name  -> target  recorded_sha):"
     for ln in "${plan_lines[@]}"; do
         IFS=$'\t' read -r o n s t <<<"$ln"
@@ -85,19 +107,15 @@ done < <(manifest::branches_in_order)
 
 prompt::confirm "Proceed?" || stack::die "aborted"
 
-# First pass: push + create/update each PR (description has placeholder
-# sibling list).
 declare -A pr_ids=()
 declare -A pr_urls=()
-declare -A pr_decisions=()  # name -> created|updated|skipped|reactivated
+declare -A pr_decisions=()
 
 push_branch() {
     local branch="$1"
     local local_sha
     local_sha="$(git::sha_of "$branch")"
 
-    # Determine remote SHA for force-with-lease, falling back to plain push
-    # for first-time branches.
     local remote_ref="refs/remotes/origin/$branch"
     if git::ref_exists "$remote_ref"; then
         local remote_sha
@@ -122,73 +140,120 @@ push_branch() {
     fi
 }
 
-render_description() {
-    # Args: order, total, commit_subject, commit_body, stack_list
-    local order="$1" total="$2" subject="$3" body="$4" stack_list="$5"
-    local tmpl="$STACK_HOME/share/pr-description.tmpl"
-    [[ -f "$tmpl" ]] || stack::die "PR description template missing: $tmpl"
-    awk \
-        -v order="$order" -v total="$total" \
-        -v subject="$subject" -v body="$body" -v stack_list="$stack_list" '
-        {
-            gsub(/{{ORDER}}/, order);
-            gsub(/{{TOTAL}}/, total);
-            gsub(/{{COMMIT_SUBJECT}}/, subject);
-            gsub(/{{COMMIT_BODY}}/, body);
-            gsub(/{{STACK_LIST}}/, stack_list);
-            print;
-        }
-    ' "$tmpl"
-}
-
-build_stack_list() {
-    # Args: this_order. Output: a markdown list with current PR bolded.
-    local this_order="$1"
-    local idx=0
+build_root_index() {
+    # Markdown list of all branches in the stack. Merged entries get
+    # strikethrough; pending PRs are marked. Live PR status comes from ADO
+    # (no cache).
     local out=''
+    local ln o n s t subject pr_id status merged pr_link
     for ln in "${plan_lines[@]}"; do
         IFS=$'\t' read -r o n s t <<<"$ln"
-        idx=$((idx + 1))
-        local subject; subject="$(manifest::branch_field "$n" commit_subject)"
-        local pr_id="${pr_ids[$n]:-}" pr_link
-        if [[ -n "$pr_id" ]]; then
+        subject="$(manifest::branch_field "$n" commit_subject)"
+        pr_id="${pr_ids[$n]:-}"
+        merged=0
+        if [[ -n "$pr_id" && "$pr_id" != "(dry-run)" ]]; then
+            status="$(az::pr_show "$pr_id" 2>/dev/null | jq -r '.status // empty' 2>/dev/null || echo)"
+            [[ "$status" == "completed" ]] && merged=1
             pr_link="#$pr_id"
         else
-            pr_link="(not yet pushed)"
+            pr_link="(pending)"
         fi
-        local prefix='- '
-        if (( o == this_order )); then
-            prefix='- **'
-            out+="${prefix}Part ${o} of ${total} (this PR): ${pr_link} - ${subject}**"$'\n'
+        if (( merged )); then
+            out+="- ${o}. ~~${pr_link} - ${subject}~~ (merged)"$'\n'
         else
-            out+="${prefix}Part ${o} of ${total}: ${pr_link} - ${subject}"$'\n'
+            out+="- ${o}. ${pr_link} - ${subject}"$'\n'
         fi
     done
     printf '%s' "$out"
 }
 
+# render_with_subs <template-path> [KEY VAL ...]: read the template and
+# replace each {{KEY}} marker with VAL. Bash parameter expansion handles
+# multiline values (e.g., the markdown Stack: list).
+render_with_subs() {
+    local tmpl="$1"; shift
+    [[ -f "$tmpl" ]] || stack::die "PR description template missing: $tmpl"
+    local content
+    content="$(cat "$tmpl")"
+    while (( $# > 0 )); do
+        local key="$1" val="$2"
+        content="${content//\{\{${key}\}\}/${val}}"
+        shift 2
+    done
+    printf '%s\n' "$content"
+}
+
+render_root_description() {
+    local subject="$1" body="$2" order="$3"
+    local list; list="$(build_root_index)"
+    render_with_subs "$STACK_HOME/share/pr-description-root.tmpl" \
+        COMMIT_SUBJECT "$subject" \
+        COMMIT_BODY    "$body" \
+        ORDER          "$order" \
+        STACK_LIST     "$list" \
+        MANIFEST_PATH  "$STACK_MANIFEST"
+}
+
+render_root_landed_description() {
+    local list; list="$(build_root_index)"
+    render_with_subs "$STACK_HOME/share/pr-description-root-landed.tmpl" \
+        STACK_LIST    "$list" \
+        MANIFEST_PATH "$STACK_MANIFEST"
+}
+
+render_leaf_description() {
+    local subject="$1" body="$2" order="$3" root_link="$4"
+    render_with_subs "$STACK_HOME/share/pr-description-leaf.tmpl" \
+        COMMIT_SUBJECT "$subject" \
+        COMMIT_BODY    "$body" \
+        ORDER          "$order" \
+        ROOT_LINK      "$root_link" \
+        MANIFEST_PATH  "$STACK_MANIFEST"
+}
+
+build_title() {
+    # [Part N] subject. Stable across structural changes (no "of M").
+    local order="$1" subject="$2"
+    local title="[Part $order] $subject"
+    if (( ${#title} > 120 )); then
+        title="${title:0:117}..."
+    fi
+    printf '%s' "$title"
+}
+
+build_description_for() {
+    # Pick the right template based on whether this branch is the
+    # designated root.
+    local order="$1" name="$2" subject="$3" body="$4"
+    local out_file="$5"
+    if [[ "$name" == "$designated_root_name" ]]; then
+        render_root_description "$subject" "$body" "$order" > "$out_file"
+    else
+        local root_link
+        if [[ -n "$root_pr_id" ]]; then
+            root_link="#$root_pr_id"
+        else
+            # The root hasn't been created yet in this run. Iteration is
+            # by order so this can only happen if the designated root is
+            # not in plan_lines (e.g. concurrent edit). Use a safe fallback.
+            root_link="(root pending)"
+        fi
+        render_leaf_description "$subject" "$body" "$order" "$root_link" > "$out_file"
+    fi
+}
+
 handle_pr_for_branch() {
     local order="$1" name="$2" target="$3"
-    local subject body
+    local subject body title desc_file tmpd
     subject="$(manifest::branch_field "$name" commit_subject)"
     body="$(manifest::branch_field "$name" commit_body)"
+    title="$(build_title "$order" "$subject")"
+    tmpd="$(stack::tmpdir)"
+    desc_file="$tmpd/desc-$name.md"
+    build_description_for "$order" "$name" "$subject" "$body" "$desc_file"
 
-    local title="[Part $order of $total] $subject"
-    # Truncate title if too long.
-    local max=120
-    if (( ${#title} > max )); then
-        title="${title:0:$((max - 3))}..."
-    fi
-
-    local stack_list; stack_list="$(build_stack_list "$order")"
-    local tmpd; tmpd="$(stack::tmpdir)"
-    local desc_file="$tmpd/desc-$name.md"
-    render_description "$order" "$total" "$subject" "$body" "$stack_list" > "$desc_file"
-
-    # Look for existing PRs from this branch.
-    local existing
+    local existing active_id completed_id abandoned_id
     existing="$(az::pr_list_for_branch "$name")"
-    local active_id completed_id abandoned_id
     active_id="$(printf '%s' "$existing" | jq -r '.[] | select(.status=="active") | .pullRequestId' | head -1)"
     completed_id="$(printf '%s' "$existing" | jq -r '.[] | select(.status=="completed") | .pullRequestId' | head -1)"
     abandoned_id="$(printf '%s' "$existing" | jq -r '.[] | select(.status=="abandoned") | .pullRequestId' | head -1)"
@@ -215,7 +280,7 @@ handle_pr_for_branch() {
         choice="$(prompt::choice "Action for $name (merged PR exists)?" "s/c/a")"
         case "$choice" in
             s) pr_ids["$name"]="$completed_id"; pr_urls["$name"]="$(az::pr_url_from_id "$completed_id")"; pr_decisions["$name"]="skipped"; return 0 ;;
-            c) ;; # create new below
+            c) ;;
             a) stack::die "aborted by user" ;;
         esac
     elif [[ -n "$abandoned_id" ]]; then
@@ -232,7 +297,7 @@ handle_pr_for_branch() {
                 pr_decisions["$name"]="reactivated"
                 return 0
                 ;;
-            c) ;; # create new below
+            c) ;;
             a) stack::die "aborted by user" ;;
         esac
     fi
@@ -261,38 +326,32 @@ for ln in "${plan_lines[@]}"; do
     handle_pr_for_branch "$o" "$n" "$t"
     if [[ "${STACK_DRY_RUN:-0}" != 1 && -n "${pr_ids[$n]:-}" ]]; then
         manifest::set_pr "$n" "${pr_ids[$n]}" "${pr_urls[$n]}"
+        # Record root identity on first creation of the designated root branch.
+        if [[ -z "$root_pr_id" && "$n" == "$designated_root_name" && "${pr_ids[$n]}" != "(dry-run)" ]]; then
+            root_pr_id="${pr_ids[$n]}"
+            root_pr_url="${pr_urls[$n]}"
+            manifest::set_root_pr "$root_pr_id" "$root_pr_url"
+            stack::info "recorded root PR: #$root_pr_id"
+        fi
     fi
 done
 
-# Pass 2: re-render descriptions with full sibling list (now that every
-# pr_id is known) and update each PR.
-if [[ "${STACK_DRY_RUN:-0}" != 1 ]]; then
-    stack::info "second pass: refreshing descriptions with sibling links"
-    for ln in "${plan_lines[@]}"; do
-        IFS=$'\t' read -r o n s t <<<"$ln"
-        local_pr_id="${pr_ids[$n]:-}"
-        [[ -n "$local_pr_id" && "$local_pr_id" != "(dry-run)" ]] || continue
-        subject="$(manifest::branch_field "$n" commit_subject)"
-        body="$(manifest::branch_field "$n" commit_body)"
-        title="[Part $o of $total] $subject"
-        if (( ${#title} > 120 )); then title="${title:0:117}..."; fi
-        stack_list="$(build_stack_list "$o")"
-        tmpd="$(stack::tmpdir)"
-        desc_file="$tmpd/desc-pass2-$n.md"
-        render_description "$o" "$total" "$subject" "$body" "$stack_list" > "$desc_file"
-        az::pr_update "$local_pr_id" --description-file "$desc_file" >/dev/null
-    done
-fi
-
-# Refresh the PR status cache.
-if [[ "${STACK_DRY_RUN:-0}" != 1 ]]; then
-    ids_array=()
-    for ln in "${plan_lines[@]}"; do
-        IFS=$'\t' read -r o n s t <<<"$ln"
-        ids_array+=("${pr_ids[$n]:-}")
-    done
-    cache_json="$(az::refresh_status_cache "${ids_array[@]}")"
-    manifest::set_pr_status_cache "$cache_json"
+# Final: update the root PR's description with the canonical Stack: list
+# (now that every PR id is known). Single PR update, not a stack-wide pass.
+if [[ "${STACK_DRY_RUN:-0}" != 1 && -n "$root_pr_id" ]]; then
+    stack::info "refreshing root PR #$root_pr_id with canonical stack index"
+    tmpd="$(stack::tmpdir)"
+    desc_file="$tmpd/desc-root-final.md"
+    if [[ -n "$designated_root_name" ]]; then
+        root_order="$(manifest::branch_field "$designated_root_name" order)"
+        root_subject="$(manifest::branch_field "$designated_root_name" commit_subject)"
+        root_body="$(manifest::branch_field "$designated_root_name" commit_body)"
+        render_root_description "$root_subject" "$root_body" "$root_order" > "$desc_file"
+    else
+        # Root branch was landed; refresh description with landed template.
+        render_root_landed_description > "$desc_file"
+    fi
+    az::pr_update "$root_pr_id" --description-file "$desc_file" >/dev/null
 fi
 
 stack::ok "stack push complete"
@@ -302,4 +361,7 @@ stack::ok "stack push complete"
         IFS=$'\t' read -r o n s t <<<"$ln"
         printf '  %s  %s [%s]  %s\n' "$o" "$n" "${pr_decisions[$n]:-?}" "${pr_urls[$n]:-?}"
     done
+    if [[ -n "$root_pr_id" ]]; then
+        printf '  root: #%s\n' "$root_pr_id"
+    fi
 } >&2

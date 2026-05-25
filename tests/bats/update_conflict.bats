@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 
     # Point STACK_PYCHARM at our mock; tests below set MOCK_PYCHARM_MODE.
     export STACK_PYCHARM="$STACK_HOME/tests/bats/mocks/pycharm"
@@ -27,8 +27,8 @@ setup() {
     assert_output_contains "conflict resolution(s) occurred during rebuild"
 
     # Manifest must reflect the new SHAs.
-    [[ "$(jq -r '.branches[] | select(.name==\"feat-2\") | .commit_sha' stack-manifest.json)" == "$(git rev-parse feat-2)" ]]
-    [[ "$(jq -r '.branches[] | select(.name==\"feat-4\") | .commit_sha' stack-manifest.json)" == "$(git rev-parse feat-4)" ]]
+    [[ "$(jq -r '.branches[] | select(.name==\"feat-2\") | .commit_sha' "$STACK_MANIFEST")" == "$(git rev-parse feat-2)" ]]
+    [[ "$(jq -r '.branches[] | select(.name==\"feat-4\") | .commit_sha' "$STACK_MANIFEST")" == "$(git rev-parse feat-4)" ]]
 }
 
 @test "conflict (resolve_with_markers): abort + restore snapshot" {

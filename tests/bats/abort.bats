@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 }
 
 run_abort() {

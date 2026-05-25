@@ -8,8 +8,6 @@ IFS=$'\n\t'
 
 # shellcheck source=../lib/common.sh
 source "$STACK_HOME/lib/common.sh"
-# shellcheck source=../lib/structured.sh
-source "$STACK_HOME/lib/structured.sh"
 # shellcheck source=../lib/git_helpers.sh
 source "$STACK_HOME/lib/git_helpers.sh"
 # shellcheck source=../lib/manifest.sh
@@ -19,25 +17,26 @@ source "$STACK_HOME/lib/branchless.sh"
 
 stack::parse_global_flags "$@"
 stack::preflight_repo
+stack::resolve_manifest
 branchless::preflight
 manifest::load
 
 declare -i exit_code=0
 declare -A FINDINGS=()
+PRECONDITIONS=()
 
 emit() {
     local class="$1" branch="$2" detail="$3"
     FINDINGS["$class:$branch"]="$detail"
-    stack::s "drift $class branch=$branch $detail"
 }
 
 cur_branch="$(git::current_branch 2>/dev/null || echo '')"
 if [[ -z "$cur_branch" ]]; then
-    emit DETACHED_HEAD '-' 'HEAD is detached'
+    PRECONDITIONS+=("HEAD is detached")
 fi
 
 if ! git::working_tree_clean; then
-    emit DIRTY_WORKTREE '-' 'uncommitted changes or in-progress merge/rebase'
+    PRECONDITIONS+=("uncommitted changes or in-progress merge/rebase")
 fi
 
 declare -A parent_recorded_sha=()
@@ -100,8 +99,18 @@ if [[ -n "$recorded_base_ref" ]]; then
 fi
 
 human_summary() {
+    if (( ${#PRECONDITIONS[@]} > 0 )); then
+        stack::warn "preconditions not met (state-changing commands will refuse):"
+        for line in "${PRECONDITIONS[@]}"; do
+            printf '  %s\n' "$line" >&2
+        done
+    fi
     if (( ${#FINDINGS[@]} == 0 )); then
-        stack::ok "no drift; manifest matches local state"
+        if (( ${#PRECONDITIONS[@]} == 0 )); then
+            stack::ok "no drift; manifest matches local state"
+        else
+            stack::info "no drift (preconditions noted above)"
+        fi
     else
         stack::info "drift findings:"
         for key in "${!FINDINGS[@]}"; do
@@ -129,21 +138,7 @@ show_manifest_summary() {
     } >&2
 }
 
-show_pr_cache() {
-    local cache_raw
-    cache_raw="$(manifest::get_json '.pr_status_cache // empty')"
-    [[ -n "$cache_raw" ]] || return 0
-    local fetched_at
-    fetched_at="$(printf '%s' "$cache_raw" | jq -r '.fetched_at // "unknown"')"
-    {
-        echo
-        echo "pr_status_cache (fetched_at=$fetched_at):"
-        printf '%s' "$cache_raw" | jq -r '.prs // {} | to_entries[] | "  PR #\(.key): \(.value)"'
-    } >&2
-}
-
 show_smartlog() {
-    [[ "${STACK_STRUCTURED:-0}" == 0 ]] || return 0
     [[ "${STACK_VERBOSE:-0}" == 1 ]] || return 0
     echo >&2
     echo "smartlog:" >&2
@@ -152,12 +147,9 @@ show_smartlog() {
     fi
 }
 
-if [[ "${STACK_STRUCTURED:-0}" == 0 ]]; then
-    show_manifest_summary
-    human_summary
-    show_pr_cache
-    show_smartlog
-fi
+show_manifest_summary
+human_summary
+show_smartlog
 
 # Exit code semantics: 0 on clean or warn-only findings, non-zero only when
 # the manifest itself is invalid (which manifest::load already would have

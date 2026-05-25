@@ -13,7 +13,9 @@ manifest::path() {
     printf '%s\n' "$STACK_MANIFEST"
 }
 
-# Validates required fields and that branches are ordered 1..N without gaps.
+# Validates required fields. Order values must be positive integers and
+# unique across branches; gaps are allowed (a stack with branches at orders
+# 2, 3, 4 is valid, as happens after a stack-land drops order 1).
 manifest::load() {
     local path
     path="$(manifest::path)"
@@ -31,12 +33,13 @@ manifest::load() {
                     (if (.branches | type) != "array" or (.branches | length) == 0 then "branches: must be a non-empty array" else empty end),
                     (.branches | to_entries[] |
                         [
-                            (if (.value.order  // null) != (.key + 1) then "branches[\(.key)].order: must equal \(.key + 1)" else empty end),
+                            (if (.value.order | type) != "number" or .value.order < 1 or (.value.order | floor) != .value.order then "branches[\(.key)].order: must be a positive integer" else empty end),
                             (if (.value.name   | type) != "string" then "branches[\(.key)].name: must be string"   else empty end),
                             (if (.value.commit_sha | type) != "string" then "branches[\(.key)].commit_sha: must be string" else empty end),
                             (if (.value.parent_branch | type) != "string" then "branches[\(.key)].parent_branch: must be string" else empty end)
                         ] | .[]
-                    )
+                    ),
+                    (if (.branches | map(.order) | length) != (.branches | map(.order) | unique | length) then "branches: order values must be unique" else empty end)
                 ] | join("\n");
             check
         ' "$path"
@@ -143,30 +146,26 @@ manifest::set_pr() {
         '.branches |= map(if .name == $name then .pr_id = $id | .pr_url = $url else . end)'
 }
 
-# pr_status_cache_json: full JSON object including fetched_at + prs map.
-manifest::set_pr_status_cache() {
-    local cache_json="$1"
-    manifest::edit_with_args --argjson cache "$cache_json" '.pr_status_cache = $cache'
+# Set-once: write root_pr_id / root_pr_url only if not already populated.
+# Preserved across stack land so back-links from later PRs remain valid even
+# after the root branch has been removed from the manifest.
+manifest::set_root_pr() {
+    local pr_id="$1" pr_url="$2"
+    manifest::edit_with_args \
+        --arg id "$pr_id" --arg url "$pr_url" \
+        'if (.root_pr_id // "") == "" then .root_pr_id = $id | .root_pr_url = $url else . end'
 }
 
-# Remove a branch from the array; does NOT renumber. Caller pairs with renumber.
+manifest::root_pr_id() {
+    jq -r '.root_pr_id // empty' "$(manifest::path)"
+}
+
+# Remove a branch from the array. Remaining branches keep their original
+# order values; gaps after a land are intentional.
 manifest::drop_branch() {
     local name="$1"
     manifest::edit_with_args --arg name "$name" \
         '.branches |= map(select(.name != $name))'
-}
-
-# Renumber branch orders to 1..N based on current sort order. Names are NOT
-# rewritten; the manifest is the source of truth for branch names and the
-# stack_prefix-N convention is informational only after a land.
-manifest::renumber() {
-    manifest::edit '.branches |= (sort_by(.order) | to_entries | map(.value + {order: (.key + 1)}))'
-}
-
-# Emit current branch parent walk after a renumber so the caller can rewrite
-# parent_branch fields. Lines: <order>\t<name>\t<old_name?>
-manifest::dump_branch_names() {
-    jq -r '.branches | sort_by(.order) | .[] | [.order, .name] | @tsv' "$(manifest::path)"
 }
 
 # Set parent_branch for a given branch by name.

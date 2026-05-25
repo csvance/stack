@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 
     # Set up a bare repo as origin and push the initial state.
     ORIGIN="$BATS_TEST_TMPDIR/origin.git"
@@ -28,45 +28,59 @@ setup() {
     # against a non-pushable URL during fetch:
     git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
     # Add base_ref to manifest so push knows the bottom target.
-    jq '. + {base_ref: "main"}' stack-manifest.json > tmp.json
-    mv tmp.json stack-manifest.json
+    jq '. + {base_ref: "main"}' "$STACK_MANIFEST" > tmp.json
+    mv tmp.json "$STACK_MANIFEST"
 
     export MOCK_AZ_STATE_DIR="$BATS_TEST_TMPDIR/az-state"
 }
 
-@test "first push creates one PR per branch with sibling cross-links" {
+@test "first push creates one PR per branch and records root_pr_id" {
     run "$STACK_HOME/bin/stack" push --yes
     assert_success
 
     # Each branch should have a pr_id recorded.
     for b in feat-1 feat-2 feat-3 feat-4; do
         local id
-        id="$(jq -r --arg n "$b" '.branches[] | select(.name==$n) | .pr_id // empty' stack-manifest.json)"
+        id="$(jq -r --arg n "$b" '.branches[] | select(.name==$n) | .pr_id // empty' "$STACK_MANIFEST")"
         [[ -n "$id" ]]
     done
 
     # Targets: feat-1 -> main, feat-2 -> feat-1, ..., feat-4 -> feat-3.
     local t
-    t="$(jq -r '.branches[] | select(.name=="feat-1") | .pr_id' stack-manifest.json)"
-    pr_json="$(MOCK_AZ_STATE_DIR=$MOCK_AZ_STATE_DIR cat "$MOCK_AZ_STATE_DIR/pr-$t.json")"
+    t="$(jq -r '.branches[] | select(.name=="feat-1") | .pr_id' "$STACK_MANIFEST")"
+    pr_json="$(cat "$MOCK_AZ_STATE_DIR/pr-$t.json")"
     [[ "$(printf '%s' "$pr_json" | jq -r .targetRefName)" == "refs/heads/main" ]]
 
-    t="$(jq -r '.branches[] | select(.name=="feat-3") | .pr_id' stack-manifest.json)"
+    t="$(jq -r '.branches[] | select(.name=="feat-3") | .pr_id' "$STACK_MANIFEST")"
     pr_json="$(cat "$MOCK_AZ_STATE_DIR/pr-$t.json")"
     [[ "$(printf '%s' "$pr_json" | jq -r .targetRefName)" == "refs/heads/feat-2" ]]
 
-    # pr_status_cache should be populated.
-    [[ "$(jq -r '.pr_status_cache.prs | length' stack-manifest.json)" == 4 ]]
+    # root_pr_id should equal feat-1's PR id (it is the lowest-order branch).
+    local root_id feat1_id
+    root_id="$(jq -r '.root_pr_id' "$STACK_MANIFEST")"
+    feat1_id="$(jq -r '.branches[] | select(.name=="feat-1") | .pr_id' "$STACK_MANIFEST")"
+    [[ "$root_id" == "$feat1_id" ]]
+
+    # Titles are stable: [Part N] subject (no "of M").
+    local feat2_id feat2_title
+    feat2_id="$(jq -r '.branches[] | select(.name=="feat-2") | .pr_id' "$STACK_MANIFEST")"
+    feat2_title="$(jq -r '.title' "$MOCK_AZ_STATE_DIR/pr-$feat2_id.json")"
+    [[ "$feat2_title" == "[Part 2] feat 2: edit b.txt" ]]
 }
 
-@test "second push with no changes is a no-op for git push and updates PRs" {
+@test "second push with no changes preserves root_pr_id" {
     "$STACK_HOME/bin/stack" push --yes > /dev/null
 
-    local before; before="$(jq -r '.branches[] | select(.name=="feat-2") | .pr_id' stack-manifest.json)"
+    local before_root before_feat2
+    before_root="$(jq -r '.root_pr_id' "$STACK_MANIFEST")"
+    before_feat2="$(jq -r '.branches[] | select(.name=="feat-2") | .pr_id' "$STACK_MANIFEST")"
 
     run "$STACK_HOME/bin/stack" push --yes
     assert_success
 
-    local after; after="$(jq -r '.branches[] | select(.name=="feat-2") | .pr_id' stack-manifest.json)"
-    [[ "$before" == "$after" ]]
+    local after_root after_feat2
+    after_root="$(jq -r '.root_pr_id' "$STACK_MANIFEST")"
+    after_feat2="$(jq -r '.branches[] | select(.name=="feat-2") | .pr_id' "$STACK_MANIFEST")"
+    [[ "$before_root" == "$after_root" ]]
+    [[ "$before_feat2" == "$after_feat2" ]]
 }

@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 }
 
 @test "additive: leaves user commits on the branch, rebuilds downstream, updates manifest" {
@@ -28,8 +28,8 @@ setup() {
 
     # Manifest's feat-2 commit_sha must equal the current feat-2 tip.
     local feat2_manifest
-    feat2_manifest="$(jq -r '.branches[] | select(.name=="feat-2") | .commit_sha' stack-manifest.json)"
+    feat2_manifest="$(jq -r '.branches[] | select(.name=="feat-2") | .commit_sha' "$STACK_MANIFEST")"
     [[ "$feat2_manifest" == "$(git rev-parse feat-2)" ]]
 
-    [[ "$(jq -r '.last_update.integration_strategy' stack-manifest.json)" == "additive" ]]
+    [[ "$(jq -r '.last_update.integration_strategy' "$STACK_MANIFEST")" == "additive" ]]
 }

@@ -9,8 +9,6 @@ IFS=$'\n\t'
 
 # shellcheck source=../lib/common.sh
 source "$STACK_HOME/lib/common.sh"
-# shellcheck source=../lib/structured.sh
-source "$STACK_HOME/lib/structured.sh"
 # shellcheck source=../lib/git_helpers.sh
 source "$STACK_HOME/lib/git_helpers.sh"
 # shellcheck source=../lib/manifest.sh
@@ -62,6 +60,7 @@ done
 
 stack::parse_global_flags "${remaining[@]:-}"
 stack::preflight_repo
+stack::resolve_manifest
 branchless::preflight
 manifest::load
 
@@ -131,7 +130,7 @@ done < <(manifest::branches_in_order)
     echo "merged bottom: $bottom_name (pr=${bottom_pr_id:-?})"
     echo "new base:      $new_base_sha ($base_ref)"
     if (( ${#remaining_lines[@]} > 0 )); then
-        echo "remaining (will rebase + renumber to start at order 1):"
+        echo "remaining (will rebase, original order values preserved):"
         for ln in "${remaining_lines[@]}"; do
             IFS=$'\t' read -r o n s <<<"$ln"
             printf '  %s  %s  %s\n' "$o" "$n" "${s:0:10}"
@@ -175,22 +174,23 @@ else
     git branch -D "$bottom_name" >/dev/null
 fi
 
-# Drop manifest entry + renumber.
+# Drop manifest entry. Remaining branches keep their original order values.
 if [[ "${STACK_DRY_RUN:-0}" != 1 ]]; then
     manifest::drop_branch "$bottom_name"
-    manifest::renumber
 fi
 
-# Recompute remaining branch names (now reordered 1..N-1).
+# Recompute remaining branch names from the manifest (sorted by order).
 remaining_names=()
 while IFS=$'\t' read -r order name sha parent; do
     remaining_names+=("$name")
 done < <(manifest::branches_in_order)
 
 if (( ${#remaining_names[@]} == 0 )); then
-    # Nothing to rebase; finalize manifest.
+    # Stack drained to empty: the merged bottom was the only branch.
+    # Remove the manifest entirely; the stack ceases to exist as a stack.
     if [[ "${STACK_DRY_RUN:-0}" != 1 ]]; then
-        manifest::set_base_branch "$new_base_sha"
+        rm -f "$STACK_MANIFEST"
+        stack::info "stack drained to empty; removed $STACK_MANIFEST"
     fi
     stack::ok "stack land complete; stack is now empty (last branch merged)"
     exit 0
@@ -265,17 +265,6 @@ if (( use_az )); then
         az::pr_update "$new_bottom_pr_id" --target "$remote_branch" >/dev/null
     else
         stack::info "new bottom '$new_bottom' has no recorded pr_id; nothing to retarget"
-    fi
-
-    # Refresh status cache.
-    ids=()
-    while IFS=$'\t' read -r order name sha parent; do
-        id="$(jq -r --arg n "$name" '.branches[] | select(.name==$n) | .pr_id // empty' "$(manifest::path)")"
-        [[ -n "$id" ]] && ids+=("$id")
-    done < <(manifest::branches_in_order)
-    if (( ${#ids[@]} > 0 )); then
-        cache_json="$(az::refresh_status_cache "${ids[@]}")"
-        manifest::set_pr_status_cache "$cache_json"
     fi
 fi
 

@@ -8,8 +8,6 @@ IFS=$'\n\t'
 
 # shellcheck source=../lib/common.sh
 source "$STACK_HOME/lib/common.sh"
-# shellcheck source=../lib/structured.sh
-source "$STACK_HOME/lib/structured.sh"
 # shellcheck source=../lib/git_helpers.sh
 source "$STACK_HOME/lib/git_helpers.sh"
 # shellcheck source=../lib/manifest.sh
@@ -50,6 +48,7 @@ done
 
 stack::parse_global_flags "${remaining[@]:-}"
 stack::preflight_repo
+stack::resolve_manifest
 branchless::preflight
 manifest::load
 
@@ -73,7 +72,12 @@ fi
 
 stack_prefix="$(manifest::get '.stack_prefix')"
 cur_order="$(jq -r --arg n "$cur" '.branches[] | select(.name == $n) | .order' "$(manifest::path)")"
-total="$(jq -r '.branches | length' "$(manifest::path)")"
+
+# Downstream branches by name (orders strictly greater than cur_order).
+downstream_names=()
+while IFS= read -r dn; do
+    [[ -n "$dn" ]] && downstream_names+=("$dn")
+done < <(jq -r --argjson o "$cur_order" '.branches | sort_by(.order) | map(select(.order > $o)) | .[].name' "$(manifest::path)")
 
 ahead_count="$(git rev-list --count "$cur_recorded..$head_pre")"
 stack::info "current branch=$cur new commits ahead of recorded=$ahead_count"
@@ -98,13 +102,13 @@ esac
 
 # Print summary; confirm.
 {
-    echo "branch:        $cur (order $cur_order of $total)"
+    echo "branch:        $cur (order $cur_order)"
     echo "recorded_sha:  $cur_recorded"
     echo "new_head:      $head_pre"
     echo "new_commits:   $ahead_count"
     echo "strategy:      $strategy"
-    if (( cur_order < total )); then
-        echo "downstream:    will rebase $stack_prefix-$((cur_order+1)) .. $stack_prefix-$total via git branchless move"
+    if (( ${#downstream_names[@]} > 0 )); then
+        echo "downstream:    will rebase ${downstream_names[*]} via git branchless move"
     else
         echo "downstream:    none (this is the top of the stack)"
     fi
@@ -158,9 +162,8 @@ stack::ok "$cur new tip: $cur_new"
 declare -A new_shas
 new_shas["$cur"]="$cur_new"
 
-if (( cur_order < total )); then
-    next_name="$(jq -r --argjson o "$cur_order" '.branches | sort_by(.order) | map(select(.order > $o)) | .[0].name' "$(manifest::path)")"
-    [[ -n "$next_name" && "$next_name" != "null" ]] || stack::die "could not determine next downstream branch from manifest"
+if (( ${#downstream_names[@]} > 0 )); then
+    next_name="${downstream_names[0]}"
     stack::info "rebasing downstream: git branchless move -s $next_name -d $cur_new"
     if [[ "${STACK_DRY_RUN:-0}" == 1 ]]; then
         stack::info "[dry-run] would move $next_name and descendants onto $cur_new"

@@ -226,7 +226,7 @@ If the trees do NOT match, this is a hard failure. Do these steps:
 
 ## Manifest generation
 
-After successful verification, write a `stack-manifest.json` file in the repo root describing the stack. This file will be consumed by future Azure DevOps tooling.
+After successful verification, write a manifest file at `.git/stack/manifests/<stack_prefix>.json` describing the stack. This file is consumed by the `stack` CLI for all post-decomposition operations. The path is per-stack so multiple stacks can coexist in the same repository; the `<stack_prefix>` portion matches the prefix used when naming branches.
 
 Format:
 
@@ -270,6 +270,13 @@ Format:
 
 The manifest is the contract with downstream tooling. Do not write it unless verification passed. The presence of this file with `verification.passed: true` is what the Azure DevOps tooling will check before pushing branches and creating PRs.
 
+The `stack` CLI may add the following fields on first use; the decomposer omits them:
+
+- `root_pr_id` / `root_pr_url` (top-level): the canonical root PR for the stack, set once on first `stack push` and preserved across `stack land`.
+- `pr_id` / `pr_url` (per-branch): the PR for each branch, set on `stack push`.
+- `last_update` (top-level): records the most recent `stack update`.
+- `verification.current_stack_tip_tree` / `verification.last_verified_at`: refreshed on each `stack update` and `stack sync`.
+
 For the full schema specification including all field constraints and a worked example, see `references/manifest-schema.md`.
 
 ## Final report to user
@@ -277,7 +284,7 @@ For the full schema specification including all field constraints and a worked e
 After everything succeeds, tell the user:
 - The list of branches created, in order
 - The backup ref name in case they want to revert
-- That `stack-manifest.json` was written
+- That the manifest was written to `.git/stack/manifests/<stack_prefix>.json`
 - A visual view of the result by running `git branchless smartlog` (often aliased as `git sl`, but do not assume the alias exists), which shows the stack structure at a glance
 - A suggested next step: review the stack contents with `git log --oneline --graph <prefix>-1..<prefix>-N` or visually with `git branchless smartlog`
 

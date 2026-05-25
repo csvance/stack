@@ -77,14 +77,13 @@ stack::require_cmd() {
 }
 
 # Global flag parsing. Reads the subcommand argv array, sets STACK_YES,
-# STACK_DRY_RUN, STACK_VERBOSE, STACK_STRUCTURED, STACK_MANIFEST. Leftover
-# positional args are written to the STACK_REMAINING_ARGS array.
+# STACK_DRY_RUN, STACK_VERBOSE, STACK_STACK_PREFIX. Leftover positional args
+# are written to the STACK_REMAINING_ARGS array.
 stack::parse_global_flags() {
     STACK_YES="${STACK_YES:-0}"
     STACK_DRY_RUN="${STACK_DRY_RUN:-0}"
     STACK_VERBOSE="${STACK_VERBOSE:-0}"
-    STACK_STRUCTURED="${STACK_STRUCTURED:-0}"
-    STACK_MANIFEST="${STACK_MANIFEST:-}"
+    STACK_STACK_PREFIX="${STACK_STACK_PREFIX:-}"
     STACK_REMAINING_ARGS=()
 
     while (( $# > 0 )); do
@@ -92,13 +91,12 @@ stack::parse_global_flags() {
             --yes|-y)         STACK_YES=1 ;;
             --dry-run|-n)     STACK_DRY_RUN=1 ;;
             --verbose|-v)     STACK_VERBOSE=1 ;;
-            --structured)     STACK_STRUCTURED=1 ;;
-            --manifest)
+            --stack)
                 shift
-                [[ $# -gt 0 ]] || stack::die "--manifest requires a path argument"
-                STACK_MANIFEST="$1"
+                [[ $# -gt 0 ]] || stack::die "--stack requires a prefix argument"
+                STACK_STACK_PREFIX="$1"
                 ;;
-            --manifest=*)     STACK_MANIFEST="${1#--manifest=}" ;;
+            --stack=*)        STACK_STACK_PREFIX="${1#--stack=}" ;;
             --)               shift; STACK_REMAINING_ARGS+=("$@"); return 0 ;;
             *)                STACK_REMAINING_ARGS+=("$1") ;;
         esac
@@ -107,6 +105,9 @@ stack::parse_global_flags() {
 }
 
 # Asserts cwd is inside a git worktree and exports STACK_REPO_ROOT, STACK_GIT_DIR.
+# Migrates a legacy repo-root stack-manifest.json into .git/stack/manifests/ if
+# present. Does not resolve STACK_MANIFEST; subcommands call stack::resolve_manifest
+# when they need one.
 stack::preflight_repo() {
     stack::require_cmd git jq
     if ! STACK_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
@@ -118,16 +119,89 @@ stack::preflight_repo() {
     fi
     export STACK_REPO_ROOT STACK_GIT_DIR
 
-    if [[ -z "$STACK_MANIFEST" ]]; then
-        STACK_MANIFEST="$STACK_REPO_ROOT/stack-manifest.json"
-    fi
-    export STACK_MANIFEST
+    STACK_MANIFESTS_DIR="$STACK_GIT_DIR/stack/manifests"
+    export STACK_MANIFESTS_DIR
+
+    stack::migrate_legacy_manifest
 
     # Pin the tmpdir path now (created lazily by stack::tmpdir) and register
     # the cleanup trap in the main shell so it survives across $(...) calls.
     STACK_TMPDIR="$STACK_GIT_DIR/stack-tmp/$$"
     export STACK_TMPDIR
     trap 'stack::cleanup_tmpdir' EXIT
+}
+
+# One-time migration: if a legacy <repo-root>/stack-manifest.json exists, move
+# it to .git/stack/manifests/<stack_prefix>.json. Idempotent and silent when
+# no legacy file is present.
+stack::migrate_legacy_manifest() {
+    local legacy="$STACK_REPO_ROOT/stack-manifest.json"
+    [[ -f "$legacy" ]] || return 0
+
+    local prefix
+    prefix="$(jq -r '.stack_prefix // empty' "$legacy" 2>/dev/null || true)"
+    if [[ -z "$prefix" ]]; then
+        stack::warn "legacy stack-manifest.json has no stack_prefix; leaving in place"
+        return 0
+    fi
+
+    local new_path="$STACK_MANIFESTS_DIR/${prefix}.json"
+    if [[ -f "$new_path" ]]; then
+        stack::warn "legacy $legacy and $new_path both exist; leaving legacy in place to avoid clobbering"
+        return 0
+    fi
+
+    mkdir -p "$STACK_MANIFESTS_DIR"
+    mv "$legacy" "$new_path"
+    stack::info "migrated legacy stack-manifest.json -> $new_path"
+}
+
+# Resolve STACK_MANIFEST. If STACK_MANIFEST is already set (e.g. by a test),
+# returns immediately. Otherwise picks the manifest matching --stack <prefix>
+# or, failing that, the manifest whose branches contain the current branch.
+# Errors via stack::die on no match or ambiguity.
+stack::resolve_manifest() {
+    [[ -n "${STACK_MANIFEST:-}" ]] && { export STACK_MANIFEST; return 0; }
+
+    local dir="$STACK_MANIFESTS_DIR"
+    if [[ ! -d "$dir" ]]; then
+        stack::die "no stacks in this repo (no $dir); run the decomposer first"
+    fi
+
+    if [[ -n "${STACK_STACK_PREFIX:-}" ]]; then
+        local p="$dir/${STACK_STACK_PREFIX}.json"
+        [[ -f "$p" ]] || stack::die "no stack matching --stack=$STACK_STACK_PREFIX (looked at $p); run 'stack list' to see available stacks"
+        STACK_MANIFEST="$p"
+        export STACK_MANIFEST
+        return 0
+    fi
+
+    local cur_branch
+    cur_branch="$(git symbolic-ref --short --quiet HEAD 2>/dev/null || true)"
+    if [[ -z "$cur_branch" ]]; then
+        stack::die "HEAD is detached and --stack not given; cannot select a stack"
+    fi
+
+    shopt -s nullglob
+    local matches=() m
+    for m in "$dir"/*.json; do
+        if jq -e --arg b "$cur_branch" '.branches | any(.name == $b)' "$m" >/dev/null 2>&1; then
+            matches+=("$m")
+        fi
+    done
+    shopt -u nullglob
+
+    case "${#matches[@]}" in
+        0)  stack::die "branch '$cur_branch' is not a member of any stack; use --stack <prefix> or 'stack list' to see available stacks" ;;
+        1)  STACK_MANIFEST="${matches[0]}" ;;
+        *)  stack::err "branch '$cur_branch' belongs to multiple stacks; use --stack <prefix> to disambiguate:"
+            for m in "${matches[@]}"; do
+                stack::err "  --stack=$(jq -r '.stack_prefix' "$m")"
+            done
+            stack::die "ambiguous stack selection"
+            ;;
+    esac
+    export STACK_MANIFEST
 }
 
 # Per-invocation tmpdir under .git/stack-tmp/<pid>. The path is set during

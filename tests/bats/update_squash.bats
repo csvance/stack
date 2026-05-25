@@ -7,7 +7,7 @@ setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
     fixture::make_repo_with_stack "$REPO"
     cd "$REPO"
-    export STACK_MANIFEST="$REPO/stack-manifest.json"
+    export STACK_MANIFEST="$REPO/.git/stack/manifests/feat.json"
 }
 
 @test "squash: folds new commits into the modified branch, rebuilds downstream, refreshes manifest" {
@@ -17,7 +17,7 @@ setup() {
     git commit --quiet -m "user: extra"
 
     local feat2_recorded
-    feat2_recorded="$(jq -r '.branches[] | select(.name=="feat-2") | .commit_sha' stack-manifest.json)"
+    feat2_recorded="$(jq -r '.branches[] | select(.name=="feat-2") | .commit_sha' "$STACK_MANIFEST")"
 
     run "$STACK_HOME/bin/stack" update --strategy=squash --yes
     assert_success
@@ -36,10 +36,10 @@ setup() {
 
     # Manifest's feat-2 commit_sha must have been updated.
     local feat2_new
-    feat2_new="$(jq -r '.branches[] | select(.name=="feat-2") | .commit_sha' stack-manifest.json)"
+    feat2_new="$(jq -r '.branches[] | select(.name=="feat-2") | .commit_sha' "$STACK_MANIFEST")"
     [[ "$feat2_new" != "$feat2_recorded" ]]
     [[ "$feat2_new" == "$(git rev-parse feat-2)" ]]
 
     # last_update should be a squash record.
-    [[ "$(jq -r '.last_update.integration_strategy' stack-manifest.json)" == "squash" ]]
+    [[ "$(jq -r '.last_update.integration_strategy' "$STACK_MANIFEST")" == "squash" ]]
 }

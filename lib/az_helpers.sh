@@ -127,17 +127,3 @@ az::pr_url_from_id() {
     local pr_id="$1"
     printf '%s/%s/_git/%s/pullrequest/%s\n' "$AZ_ORG_URL" "$AZ_PROJECT" "$AZ_REPO" "$pr_id"
 }
-
-# az::refresh_status_cache <pr_id>...: builds the pr_status_cache JSON.
-az::refresh_status_cache() {
-    local now
-    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local entries='{}'
-    local pr_id status
-    for pr_id in "$@"; do
-        [[ -n "$pr_id" && "$pr_id" != "null" ]] || continue
-        status="$(az::pr_show "$pr_id" | jq -r '.status // "unknown"')"
-        entries="$(jq -c --arg id "$pr_id" --arg s "$status" '. + {($id): $s}' <<<"$entries")"
-    done
-    jq -c -n --arg ts "$now" --argjson prs "$entries" '{fetched_at: $ts, prs: $prs}'
-}

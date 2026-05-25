@@ -11,7 +11,6 @@ export PATH="$TEST_HELPER_DIR/mocks:$PATH"
 export STACK_YES=1
 export STACK_DRY_RUN=0
 export STACK_VERBOSE=0
-export STACK_STRUCTURED=0
 unset STACK_MANIFEST || true
 
 # Source the libraries the tests want to unit-test.

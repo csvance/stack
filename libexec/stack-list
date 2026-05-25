@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# stack list: enumerate all stacks (manifests) in this repository.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${STACK_HOME:?stack-list must be invoked via the stack dispatcher}"
+
+# shellcheck source=../lib/common.sh
+source "$STACK_HOME/lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+Usage: stack list
+
+List every stack in this repository. Stacks are identified by their
+stack_prefix and stored under .git/stack/manifests/<prefix>.json. A '*'
+marker indicates the stack containing the currently checked-out branch.
+EOF
+}
+
+remaining=()
+while (( $# > 0 )); do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        *)         remaining+=("$1") ;;
+    esac
+    shift
+done
+
+stack::parse_global_flags "${remaining[@]:-}"
+stack::preflight_repo
+
+dir="$STACK_MANIFESTS_DIR"
+if [[ ! -d "$dir" ]]; then
+    stack::info "no stacks in this repo"
+    exit 0
+fi
+
+cur_branch="$(git symbolic-ref --short --quiet HEAD 2>/dev/null || true)"
+found=0
+
+shopt -s nullglob
+for m in "$dir"/*.json; do
+    found=1
+    prefix="$(jq -r '.stack_prefix // "?"' "$m")"
+    count="$(jq -r '.branches | length' "$m")"
+    base_ref="$(jq -r '.base_ref // ""' "$m")"
+    marker=' '
+    if [[ -n "$cur_branch" ]] && jq -e --arg b "$cur_branch" '.branches | any(.name == $b)' "$m" >/dev/null 2>&1; then
+        marker='*'
+    fi
+    printf '%s %-30s %d branch(es)  base=%s\n' "$marker" "$prefix" "$count" "${base_ref:-?}"
+done
+shopt -u nullglob
+
+if (( ! found )); then
+    stack::info "no stacks in this repo"
+fi
