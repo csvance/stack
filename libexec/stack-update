@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# stack update: rebuild the stack after the user adds commits to a stack branch.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${STACK_HOME:?stack-update must be invoked via the stack dispatcher}"
+
+# shellcheck source=../lib/common.sh
+source "$STACK_HOME/lib/common.sh"
+# shellcheck source=../lib/structured.sh
+source "$STACK_HOME/lib/structured.sh"
+# shellcheck source=../lib/git_helpers.sh
+source "$STACK_HOME/lib/git_helpers.sh"
+# shellcheck source=../lib/manifest.sh
+source "$STACK_HOME/lib/manifest.sh"
+# shellcheck source=../lib/branchless.sh
+source "$STACK_HOME/lib/branchless.sh"
+# shellcheck source=../lib/backup.sh
+source "$STACK_HOME/lib/backup.sh"
+# shellcheck source=../lib/verify.sh
+source "$STACK_HOME/lib/verify.sh"
+# shellcheck source=../lib/prompt.sh
+source "$STACK_HOME/lib/prompt.sh"
+# shellcheck source=../lib/conflict.sh
+source "$STACK_HOME/lib/conflict.sh"
+
+usage() {
+    cat <<'EOF'
+Usage: stack update [--strategy=squash|additive]
+
+Detects commits on the current stack branch that are ahead of the manifest's
+recorded SHA, folds them in (squash) or leaves them in place (additive), and
+rebuilds downstream branches via `git branchless move`. Conflicts are
+resolved via PyCharm. Tree-hash verification gates the manifest write.
+EOF
+}
+
+strategy=''
+remaining=()
+while (( $# > 0 )); do
+    case "$1" in
+        --strategy)         shift; strategy="${1:?--strategy requires a value}" ;;
+        --strategy=*)       strategy="${1#--strategy=}" ;;
+        -h|--help)          usage; exit 0 ;;
+        *)                  remaining+=("$1") ;;
+    esac
+    shift
+done
+
+stack::parse_global_flags "${remaining[@]:-}"
+stack::preflight_repo
+branchless::preflight
+manifest::load
+
+if ! git::working_tree_clean; then
+    stack::die "working tree has uncommitted changes or an in-progress merge/rebase; commit or stash first"
+fi
+
+cur="$(git::current_branch 2>/dev/null || true)"
+[[ -n "$cur" ]] || stack::die "HEAD is detached; check out the stack branch you modified"
+
+cur_recorded="$(manifest::branch_field "$cur" commit_sha)"
+[[ -n "$cur_recorded" ]] || stack::die "current branch '$cur' is not in the manifest"
+
+head_pre="$(git rev-parse HEAD)"
+if [[ "$head_pre" == "$cur_recorded" ]]; then
+    stack::die "no new commits on '$cur'; HEAD == recorded commit_sha ($head_pre)"
+fi
+if ! git::is_ancestor "$cur_recorded" "$head_pre"; then
+    stack::die "current branch '$cur' has diverged from recorded commit_sha; aborting (no rebuild path)"
+fi
+
+stack_prefix="$(manifest::get '.stack_prefix')"
+cur_order="$(jq -r --arg n "$cur" '.branches[] | select(.name == $n) | .order' "$(manifest::path)")"
+total="$(jq -r '.branches | length' "$(manifest::path)")"
+
+ahead_count="$(git rev-list --count "$cur_recorded..$head_pre")"
+stack::info "current branch=$cur new commits ahead of recorded=$ahead_count"
+stack::info "new commits:"
+git log --pretty='  %h %s' "$cur_recorded..$head_pre" >&2
+
+# Strategy selection.
+if [[ -z "$strategy" ]]; then
+    if [[ "${STACK_YES:-0}" == 1 ]]; then
+        stack::die "non-interactive run requires --strategy=squash|additive"
+    fi
+    choice="$(prompt::choice "Integration strategy: [s]quash into $cur or [a]dditive on top of $cur?" "s/a")"
+    case "$choice" in
+        s) strategy=squash ;;
+        a) strategy=additive ;;
+    esac
+fi
+case "$strategy" in
+    squash|additive) ;;
+    *) stack::die "invalid --strategy=$strategy (expected squash or additive)" ;;
+esac
+
+# Print summary; confirm.
+{
+    echo "branch:        $cur (order $cur_order of $total)"
+    echo "recorded_sha:  $cur_recorded"
+    echo "new_head:      $head_pre"
+    echo "new_commits:   $ahead_count"
+    echo "strategy:      $strategy"
+    if (( cur_order < total )); then
+        echo "downstream:    will rebase $stack_prefix-$((cur_order+1)) .. $stack_prefix-$total via git branchless move"
+    else
+        echo "downstream:    none (this is the top of the stack)"
+    fi
+} | prompt::summary_block "stack update plan"
+
+prompt::confirm "Proceed?" || stack::die "aborted"
+
+# Snapshot every stack branch + the original feature branch.
+stack::info "creating backup snapshot..."
+orig_feat="$(manifest::get '.original_feature_branch')"
+snapshot_branches=()
+while IFS=$'\t' read -r order name sha parent; do
+    snapshot_branches+=("$name")
+done < <(manifest::branches_in_order)
+if git::branch_exists "$orig_feat"; then
+    snapshot_branches+=("$orig_feat")
+fi
+if [[ "${STACK_DRY_RUN:-0}" == 1 ]]; then
+    stack::info "[dry-run] would snapshot: ${snapshot_branches[*]}"
+    set_id=""
+else
+    set_id="$(backup::snapshot update "${snapshot_branches[@]}")"
+    stack::ok "snapshot: $set_id"
+fi
+
+# Track conflict count across the run.
+export STACK_CONFLICTS_SEEN=0
+
+run_squash() {
+    stack::info "squash: git reset --soft $cur_recorded then commit --amend --no-edit"
+    if [[ "${STACK_DRY_RUN:-0}" == 1 ]]; then
+        return 0
+    fi
+    git reset --soft "$cur_recorded"
+    git commit --amend --no-edit --quiet
+}
+
+run_additive() {
+    stack::info "additive: leaving $ahead_count new commit(s) on $cur"
+}
+
+case "$strategy" in
+    squash)   run_squash ;;
+    additive) run_additive ;;
+esac
+
+cur_new="$(git rev-parse HEAD)"
+stack::ok "$cur new tip: $cur_new"
+
+# Walk downstream via a single branchless move (cascades all descendants).
+declare -A new_shas
+new_shas["$cur"]="$cur_new"
+
+if (( cur_order < total )); then
+    next_name="$(jq -r --argjson o "$cur_order" '.branches | sort_by(.order) | map(select(.order > $o)) | .[0].name' "$(manifest::path)")"
+    [[ -n "$next_name" && "$next_name" != "null" ]] || stack::die "could not determine next downstream branch from manifest"
+    stack::info "rebasing downstream: git branchless move -s $next_name -d $cur_new"
+    if [[ "${STACK_DRY_RUN:-0}" == 1 ]]; then
+        stack::info "[dry-run] would move $next_name and descendants onto $cur_new"
+    else
+        if ! conflict::drain_during_branchless_move "$next_name" "$cur_new"; then
+            stack::err "downstream rebuild aborted; restoring snapshot"
+            backup::restore "$set_id"
+            exit 1
+        fi
+    fi
+    # Collect new SHAs.
+    while IFS=$'\t' read -r order name sha parent; do
+        if (( order > cur_order )); then
+            if [[ "${STACK_DRY_RUN:-0}" == 1 ]]; then
+                new_shas["$name"]="<dry-run>"
+            else
+                new_shas["$name"]="$(git rev-parse "$name")"
+            fi
+        fi
+    done < <(manifest::branches_in_order)
+fi
+
+# Verification: expected tree = old stack tip tree + (cur_recorded..head_pre) diff
+top_name="$(jq -r '.branches | sort_by(.order) | last | .name' "$(manifest::path)")"
+
+if [[ "${STACK_DRY_RUN:-0}" == 1 ]]; then
+    stack::info "[dry-run] skipping verification + manifest write"
+    exit 0
+fi
+
+actual_tree="$(git::tree_of "$top_name")"
+
+if (( STACK_CONFLICTS_SEEN > 0 )); then
+    # Conflicts during rebuild changed downstream diffs; strict tree
+    # equality against the naive forward composition will not hold by
+    # design (the user resolved conflicts, which is exactly what changes
+    # downstream content). Surface the result and confirm.
+    stack::warn "$STACK_CONFLICTS_SEEN conflict resolution(s) occurred during rebuild"
+    stack::info "new stack tip: $top_name -> $(git::sha_of "$top_name")"
+    stack::info "new stack tip tree: $actual_tree"
+    stack::info "rebuilt commit graph (latest 8 commits):"
+    git log --oneline -8 "$top_name" >&2
+    if ! prompt::confirm "Accept the rebuilt result?"; then
+        stack::err "rejected; restoring snapshot"
+        backup::restore "$set_id"
+        exit 1
+    fi
+else
+    # No conflicts: the strict invariant must hold.
+    # Expected tree = previous stack tip tree + user's diff (cur_recorded..head_pre).
+    old_tip_tree="$(manifest::get '.verification.current_stack_tip_tree // .verification.stack_tip_tree')"
+    [[ -n "$old_tip_tree" && "$old_tip_tree" != "null" ]] || \
+        stack::die "manifest has no recorded stack_tip_tree; refusing to verify"
+
+    stack::info "computing expected tree (apply user diff onto previous stack tip tree)..."
+
+    tmpd="$(stack::tmpdir)"
+    expected_worktree="$tmpd/expected-$$"
+    tmp_commit="$(git commit-tree "$old_tip_tree" -m "stack-update verify staging")"
+    git worktree add --detach --quiet --no-checkout "$expected_worktree" "$tmp_commit"
+
+    patch="$tmpd/user-changes.patch"
+    git diff --binary "$cur_recorded" "$head_pre" > "$patch"
+
+    expected_tree="$(
+        cd "$expected_worktree"
+        git read-tree -u --reset "$old_tip_tree"
+        if [[ -s "$patch" ]]; then
+            git apply --index --whitespace=nowarn "$patch"
+        fi
+        git write-tree
+    )"
+    git worktree remove --force "$expected_worktree" >/dev/null 2>&1 || true
+
+    if [[ "$expected_tree" == "$actual_tree" ]]; then
+        stack::ok "verification passed: stack tip tree = $actual_tree"
+    else
+        stack::err "verification failed (no conflicts were resolved during rebuild but trees diverge)"
+        stack::err "  expected (T_old + user diff): $expected_tree"
+        stack::err "  actual ($top_name tree):        $actual_tree"
+        git diff-tree --stat "$expected_tree" "$actual_tree" >&2 || true
+        stack::err "restoring snapshot"
+        backup::restore "$set_id"
+        exit 1
+    fi
+fi
+
+# Manifest writes.
+manifest::set_branch_sha "$cur" "$cur_new"
+while IFS=$'\t' read -r order name sha parent; do
+    if (( order > cur_order )); then
+        manifest::set_branch_sha "$name" "${new_shas[$name]}"
+    fi
+done < <(manifest::branches_in_order)
+
+manifest::record_verification "$actual_tree"
+
+integrated_shas="$(git log --pretty='%H' "$cur_recorded..$head_pre" | jq -R . | jq -sc .)"
+manifest::record_update "$cur" "$strategy" "$integrated_shas"
+
+stack::ok "stack update complete; manifest refreshed at $STACK_MANIFEST"
+stack::info "tip: review 'stack status' and 'git branchless smartlog' before pushing"

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Mock pycharm for bats tests. Honors:
+#   MOCK_PYCHARM_MODE = resolve_clean | resolve_with_markers | unchanged | hang
+#
+# Expected invocation (matches what lib/conflict.sh will produce):
+#   pycharm merge <local> <remote> <base> <output>
+
+set -euo pipefail
+
+if [[ "${1:-}" != "merge" ]]; then
+    echo "mock-pycharm: unexpected first arg '${1:-}'; expected 'merge'" >&2
+    exit 1
+fi
+
+shift
+local_file="$1"
+remote_file="$2"
+base_file="$3"
+output_file="$4"
+
+mode="${MOCK_PYCHARM_MODE:-resolve_clean}"
+case "$mode" in
+    resolve_clean)
+        cp "$remote_file" "$output_file"
+        ;;
+    resolve_with_markers)
+        cat > "$output_file" <<EOF
+<<<<<<< local
+$(cat "$local_file" 2>/dev/null || true)
+=======
+$(cat "$remote_file" 2>/dev/null || true)
+>>>>>>> remote
+EOF
+        ;;
+    unchanged)
+        : # leave output as-is
+        ;;
+    hang)
+        sleep 30
+        ;;
+    *)
+        echo "mock-pycharm: unknown MOCK_PYCHARM_MODE=$mode" >&2
+        exit 2
+        ;;
+esac

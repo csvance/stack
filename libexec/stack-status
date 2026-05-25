@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# stack status: read-only drift inspection.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${STACK_HOME:?stack-status must be invoked via the stack dispatcher}"
+
+# shellcheck source=../lib/common.sh
+source "$STACK_HOME/lib/common.sh"
+# shellcheck source=../lib/structured.sh
+source "$STACK_HOME/lib/structured.sh"
+# shellcheck source=../lib/git_helpers.sh
+source "$STACK_HOME/lib/git_helpers.sh"
+# shellcheck source=../lib/manifest.sh
+source "$STACK_HOME/lib/manifest.sh"
+# shellcheck source=../lib/branchless.sh
+source "$STACK_HOME/lib/branchless.sh"
+
+stack::parse_global_flags "$@"
+stack::preflight_repo
+branchless::preflight
+manifest::load
+
+declare -i exit_code=0
+declare -A FINDINGS=()
+
+emit() {
+    local class="$1" branch="$2" detail="$3"
+    FINDINGS["$class:$branch"]="$detail"
+    stack::s "drift $class branch=$branch $detail"
+}
+
+cur_branch="$(git::current_branch 2>/dev/null || echo '')"
+if [[ -z "$cur_branch" ]]; then
+    emit DETACHED_HEAD '-' 'HEAD is detached'
+fi
+
+if ! git::working_tree_clean; then
+    emit DIRTY_WORKTREE '-' 'uncommitted changes or in-progress merge/rebase'
+fi
+
+declare -A parent_recorded_sha=()
+declare -A name_to_recorded_sha=()
+recorded_base_branch="$(manifest::get '.base_branch')"
+recorded_base_ref="$(manifest::base_ref)"
+stack_prefix="$(manifest::get '.stack_prefix')"
+
+while IFS=$'\t' read -r order name commit_sha parent_branch; do
+    name_to_recorded_sha["$name"]="$commit_sha"
+
+    if ! git::branch_exists "$name"; then
+        emit MISSING_BRANCH "$name" "no local ref refs/heads/$name"
+        continue
+    fi
+
+    actual_sha="$(git::sha_of "$name")"
+    if [[ "$actual_sha" != "$commit_sha" ]]; then
+        if [[ "$cur_branch" == "$name" ]] && git::is_ancestor "$commit_sha" "$actual_sha"; then
+            ahead_count="$(git rev-list --count "$commit_sha..$actual_sha")"
+            emit UNCOMMITTED_AHEAD "$name" "$ahead_count new commits ahead of recorded"
+        else
+            emit BRANCH_MOVED "$name" "recorded=$commit_sha actual=$actual_sha"
+        fi
+    fi
+
+    # parent commit check: only meaningful when actual_sha == recorded; otherwise
+    # the BRANCH_MOVED finding already supersedes parent drift.
+    if [[ "$actual_sha" == "$commit_sha" ]]; then
+        actual_parent="$(git rev-parse --verify "$name^" 2>/dev/null || echo '')"
+        expected_parent=''
+        if [[ "$order" == 1 ]]; then
+            expected_parent="$recorded_base_branch"
+        else
+            expected_parent="${name_to_recorded_sha[$parent_branch]:-}"
+        fi
+        if [[ -n "$expected_parent" && -n "$actual_parent" ]]; then
+            if [[ "$(git::sha_of "$expected_parent" 2>/dev/null || echo)" != "$actual_parent" ]]; then
+                emit PARENT_DRIFT "$name" "expected_parent=$expected_parent actual_parent=$actual_parent"
+            fi
+        fi
+    fi
+done < <(manifest::branches_in_order)
+
+if [[ -n "$recorded_base_ref" ]]; then
+    if remote_sha="$(git rev-parse --verify "$recorded_base_ref" 2>/dev/null)"; then
+        if [[ "$remote_sha" != "$recorded_base_branch" ]]; then
+            emit BASE_MOVED "$recorded_base_ref" "recorded=$recorded_base_branch local=$remote_sha"
+        fi
+    else
+        stack::warn "base_ref '$recorded_base_ref' does not resolve to a local ref; run 'git fetch' to update"
+    fi
+fi
+
+human_summary() {
+    if (( ${#FINDINGS[@]} == 0 )); then
+        stack::ok "no drift; manifest matches local state"
+    else
+        stack::info "drift findings:"
+        for key in "${!FINDINGS[@]}"; do
+            local class="${key%%:*}" rest="${key#*:}"
+            printf '  %-20s %s  %s\n' "$class" "$rest" "${FINDINGS[$key]}" >&2
+        done
+    fi
+}
+
+show_manifest_summary() {
+    {
+        echo
+        echo "manifest: $STACK_MANIFEST"
+        echo "stack_prefix: $stack_prefix"
+        echo "base_branch:  $recorded_base_branch"
+        if [[ -n "$recorded_base_ref" ]]; then
+            echo "base_ref:     $recorded_base_ref"
+        fi
+        echo "branches:"
+        manifest::branches_in_order | while IFS=$'\t' read -r order name sha parent; do
+            local subject
+            subject="$(git log -1 --pretty='%s' "$sha" 2>/dev/null || echo '<commit missing locally>')"
+            printf '  %2s %-40s %s  %s\n' "$order" "$name" "${sha:0:10}" "$subject"
+        done
+    } >&2
+}
+
+show_pr_cache() {
+    local cache_raw
+    cache_raw="$(manifest::get_json '.pr_status_cache // empty')"
+    [[ -n "$cache_raw" ]] || return 0
+    local fetched_at
+    fetched_at="$(printf '%s' "$cache_raw" | jq -r '.fetched_at // "unknown"')"
+    {
+        echo
+        echo "pr_status_cache (fetched_at=$fetched_at):"
+        printf '%s' "$cache_raw" | jq -r '.prs // {} | to_entries[] | "  PR #\(.key): \(.value)"'
+    } >&2
+}
+
+show_smartlog() {
+    [[ "${STACK_STRUCTURED:-0}" == 0 ]] || return 0
+    echo >&2
+    echo "smartlog:" >&2
+    if ! branchless::smartlog >&2; then
+        stack::warn "branchless smartlog failed"
+    fi
+}
+
+if [[ "${STACK_STRUCTURED:-0}" == 0 ]]; then
+    show_manifest_summary
+    human_summary
+    show_pr_cache
+    show_smartlog
+fi
+
+# Exit code semantics: 0 on clean or warn-only findings, non-zero only when
+# the manifest itself is invalid (which manifest::load already would have
+# caught). The plan classifies MANIFEST_INVALID as the only hard refuse for
+# status; everything else is reportable.
+exit "$exit_code"

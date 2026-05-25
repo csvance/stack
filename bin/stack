@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# stack: dispatcher for the stacked-diff CLI.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+_stack_resolve_dir() {
+    local s="$1" d
+    while [[ -L "$s" ]]; do
+        d="$(cd -P "$(dirname "$s")" && pwd)"
+        s="$(readlink "$s")"
+        [[ "$s" == /* ]] || s="$d/$s"
+    done
+    cd -P "$(dirname "$s")" && pwd
+}
+
+_STACK_BIN_DIR="$(_stack_resolve_dir "${BASH_SOURCE[0]}")"
+STACK_HOME="$(cd -P "$_STACK_BIN_DIR/.." && pwd)"
+export STACK_HOME
+
+stack::usage() {
+    cat <<'EOF'
+Usage: stack <subcommand> [args]
+
+Subcommands:
+  status   Show current stack state and drift detection
+  abort    Restore from a backup snapshot
+  update   Rebuild the stack after local edits (Phase 2)
+  push     Force-push branches and create/update PRs (Phase 3)
+  sync     Rebase the stack onto a moved base branch (Phase 4)
+  land     Drop a merged bottom PR and rebase the rest (Phase 5)
+
+Global flags (pass through to the subcommand):
+  --yes, -y          Skip confirmation prompts
+  --dry-run, -n      Print what would be done without doing it
+  --verbose, -v      Verbose logging
+  --structured       One-fact-per-line output (for script consumers)
+  --manifest <path>  Use the manifest at <path> instead of <repo>/stack-manifest.json
+
+Run `stack <subcommand> --help` for subcommand-specific options.
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+    stack::usage
+    exit 2
+fi
+
+case "$1" in
+    -h|--help|help)
+        stack::usage
+        exit 0
+        ;;
+    --version)
+        echo "stack 0.1.0"
+        exit 0
+        ;;
+esac
+
+sub="$1"; shift
+
+cmd="$STACK_HOME/libexec/stack-$sub"
+if [[ ! -x "$cmd" ]]; then
+    echo "stack: unknown subcommand: $sub" >&2
+    echo >&2
+    stack::usage >&2
+    exit 2
+fi
+
+exec "$cmd" "$@"
