@@ -46,6 +46,7 @@ branchless::preflight
 manifest::load
 az::preflight
 az::resolve_repo
+az::preflight_auth
 
 # Determine target for the bottom branch.
 base_ref="$(manifest::base_ref)"

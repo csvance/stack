@@ -68,6 +68,7 @@ manifest::load
 if (( use_az )); then
     az::preflight
     az::resolve_repo
+    az::preflight_auth
 fi
 
 if ! git::working_tree_clean; then

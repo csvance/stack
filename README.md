@@ -54,7 +54,8 @@ All subcommands accept these global flags:
 
 - **`stack status`** Read-only. Prints the manifest summary, reports drift
   between the manifest and local branches (see "Drift detection" below),
-  shows the `git branchless smartlog`, and surfaces any cached PR status.
+  and surfaces any cached PR status. Pass `--verbose` to also render the
+  `git branchless smartlog`.
 - **`stack abort`** Restores from the most recent backup snapshot.
   `stack abort --list` enumerates available snapshots; `stack abort --set
   <ref>` restores a specific one.

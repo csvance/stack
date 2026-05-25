@@ -8,11 +8,25 @@ _STACK_AZ_HELPERS_SH=1
 
 az::preflight() {
     stack::require_cmd az
-    if ! az account show --only-show-errors -o none >/dev/null 2>&1; then
-        stack::die "az is not signed in; run 'az login' (and ensure the azure-devops extension is installed)"
-    fi
     if ! az extension show --name azure-devops >/dev/null 2>&1; then
         stack::die "azure-devops extension missing; run 'az extension add --name azure-devops'"
+    fi
+}
+
+# Verifies the configured repo is reachable with the current credentials.
+# Works for both Azure DevOps Services (az login / AAD) and on-prem
+# Azure DevOps Server (az devops login with a PAT). Probes the actual repo
+# so we exercise the same scope ("Code (read)") that PR operations require.
+# Requires az::resolve_repo to have populated AZ_* first.
+az::preflight_auth() {
+    [[ -n "${AZ_ORG_URL:-}" && -n "${AZ_PROJECT:-}" && -n "${AZ_REPO:-}" ]] \
+        || stack::die "az::preflight_auth: AZ_* not set (call az::resolve_repo first)"
+    if ! az repos show \
+            --organization "$AZ_ORG_URL" \
+            --project "$AZ_PROJECT" \
+            --repository "$AZ_REPO" \
+            --only-show-errors -o none >/dev/null 2>&1; then
+        stack::die "az cannot reach $AZ_ORG_URL/$AZ_PROJECT/$AZ_REPO with the current credentials; for Azure DevOps cloud run 'az login', for on-prem run 'az devops login --organization $AZ_ORG_URL' with a PAT that has Code (read, write) scope"
     fi
 }
 
@@ -22,31 +36,35 @@ az::preflight() {
 #   https://<user>@dev.azure.com/<org>/<project>/_git/<repo>
 #   git@ssh.dev.azure.com:v3/<org>/<project>/<repo>
 #   https://<org>.visualstudio.com/<project>/_git/<repo>
+#   https://<host>[/<path>...]/<project>/_git/<repo>  (Azure DevOps Server / on-prem)
 az::resolve_repo() {
     local url
     url="$(git remote get-url origin 2>/dev/null)" || stack::die "no 'origin' remote configured"
 
     local org='' project='' repo=''
-    if [[ "$url" =~ ^https?://([^/@]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/?#]+) ]]; then
-        org="${BASH_REMATCH[2]}"
-        project="${BASH_REMATCH[3]}"
-        repo="${BASH_REMATCH[4]}"
-        AZ_ORG_URL="https://dev.azure.com/$org"
-    elif [[ "$url" =~ ^git@ssh\.dev\.azure\.com:v3/([^/]+)/([^/]+)/([^/?#]+) ]]; then
+    if [[ "$url" =~ ^git@ssh\.dev\.azure\.com:v3/([^/]+)/([^/]+)/([^/?#]+) ]]; then
+        # SSH form is a special snowflake; no /_git/ marker, so handle it first.
         org="${BASH_REMATCH[1]}"
         project="${BASH_REMATCH[2]}"
         repo="${BASH_REMATCH[3]}"
         AZ_ORG_URL="https://dev.azure.com/$org"
-    elif [[ "$url" =~ ^https?://([^/.]+)\.visualstudio\.com/([^/]+)/_git/([^/?#]+) ]]; then
-        org="${BASH_REMATCH[1]}"
-        project="${BASH_REMATCH[2]}"
-        repo="${BASH_REMATCH[3]}"
-        AZ_ORG_URL="https://$org.visualstudio.com"
+        AZ_PROJECT="$project"
+    elif [[ "$url" =~ ^(https?://[^[:space:]]+)/_git/([^/?#]+) ]]; then
+        # Any HTTPS form with /_git/<repo>. The path segment immediately before
+        # /_git/ is the project; everything else is the org URL.
+        local left="${BASH_REMATCH[1]}"
+        repo="${BASH_REMATCH[2]}"
+        project="${left##*/}"
+        AZ_ORG_URL="${left%/*}"
+        AZ_PROJECT="$project"
+        # Strip any embedded user info from the host (e.g. https://user@host/...).
+        if [[ "$AZ_ORG_URL" =~ ^(https?://)[^/]*@(.*)$ ]]; then
+            AZ_ORG_URL="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+        fi
     else
         stack::die "could not parse Azure DevOps URL from origin remote: $url"
     fi
 
-    AZ_PROJECT="$project"
     AZ_REPO="${repo%.git}"
     export AZ_ORG_URL AZ_PROJECT AZ_REPO
 

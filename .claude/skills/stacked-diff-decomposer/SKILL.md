@@ -235,6 +235,7 @@ Format:
   "version": 1,
   "created_at": "<ISO 8601 timestamp>",
   "base_branch": "<base-branch>",
+  "base_ref": "<base-branch>",
   "original_feature_branch": "<feature-branch>",
   "original_tip_commit": "<full sha>",
   "stack_prefix": "<prefix>",

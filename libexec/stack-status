@@ -83,9 +83,16 @@ while IFS=$'\t' read -r order name commit_sha parent_branch; do
 done < <(manifest::branches_in_order)
 
 if [[ -n "$recorded_base_ref" ]]; then
-    if remote_sha="$(git rev-parse --verify "$recorded_base_ref" 2>/dev/null)"; then
-        if [[ "$remote_sha" != "$recorded_base_branch" ]]; then
-            emit BASE_MOVED "$recorded_base_ref" "recorded=$recorded_base_branch local=$remote_sha"
+    if remote_sha="$(git rev-parse --verify "$recorded_base_ref^{commit}" 2>/dev/null)"; then
+        # base_branch may hold either the fork-point SHA (after sync/land) or
+        # a branch name (as written by the decomposer skill). Resolve to a SHA
+        # before comparing so we don't false-positive on a name vs SHA mismatch.
+        if recorded_sha="$(git rev-parse --verify "$recorded_base_branch^{commit}" 2>/dev/null)"; then
+            if [[ "$remote_sha" != "$recorded_sha" ]]; then
+                emit BASE_MOVED "$recorded_base_ref" "recorded=$recorded_base_branch ($recorded_sha) local=$remote_sha"
+            fi
+        else
+            stack::warn "base_branch '$recorded_base_branch' does not resolve to a commit; cannot check BASE_MOVED"
         fi
     else
         stack::warn "base_ref '$recorded_base_ref' does not resolve to a local ref; run 'git fetch' to update"
@@ -137,6 +144,7 @@ show_pr_cache() {
 
 show_smartlog() {
     [[ "${STACK_STRUCTURED:-0}" == 0 ]] || return 0
+    [[ "${STACK_VERBOSE:-0}" == 1 ]] || return 0
     echo >&2
     echo "smartlog:" >&2
     if ! branchless::smartlog >&2; then

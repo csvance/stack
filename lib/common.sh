@@ -122,20 +122,21 @@ stack::preflight_repo() {
         STACK_MANIFEST="$STACK_REPO_ROOT/stack-manifest.json"
     fi
     export STACK_MANIFEST
-}
 
-# Per-invocation tmpdir under .git/stack-tmp/<pid>. Created lazily by
-# stack::tmpdir; cleaned on EXIT.
-stack::tmpdir() {
-    if [[ -n "${STACK_TMPDIR:-}" ]]; then
-        printf '%s\n' "$STACK_TMPDIR"
-        return 0
-    fi
-    [[ -n "${STACK_GIT_DIR:-}" ]] || stack::die "stack::tmpdir requires stack::preflight_repo first"
+    # Pin the tmpdir path now (created lazily by stack::tmpdir) and register
+    # the cleanup trap in the main shell so it survives across $(...) calls.
     STACK_TMPDIR="$STACK_GIT_DIR/stack-tmp/$$"
-    mkdir -p "$STACK_TMPDIR"
     export STACK_TMPDIR
     trap 'stack::cleanup_tmpdir' EXIT
+}
+
+# Per-invocation tmpdir under .git/stack-tmp/<pid>. The path is set during
+# stack::preflight_repo so the EXIT trap registers in the main shell (not in
+# a command-substitution subshell, where it would fire immediately and delete
+# the directory). stack::tmpdir is idempotent and safe to call from $(...).
+stack::tmpdir() {
+    [[ -n "${STACK_TMPDIR:-}" ]] || stack::die "stack::tmpdir requires stack::preflight_repo first"
+    mkdir -p "$STACK_TMPDIR"
     printf '%s\n' "$STACK_TMPDIR"
 }
 
