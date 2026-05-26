@@ -1,0 +1,44 @@
+# StackBot + Redis sidecar.
+#
+# Bring up:
+#   STACK_ADO_PAT=... docker compose up --build
+#
+# Requires a host-side config.yaml in this directory. Use the schema from the
+# README "Configure" section, and set `redis.host: redis` so the bot resolves
+# the sidecar via the compose network. The PAT is interpolated into config.yaml
+# from the STACK_ADO_PAT environment variable.
+#
+# Single-replica only: stack_bot/stack_locks.py serializes per-stack work
+# in-process. See the TODO(multi-replica) marker before scaling horizontally.
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  bot:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      STACK_ADO_PAT: ${STACK_ADO_PAT:?STACK_ADO_PAT must be set in the host environment}
+      STACKBOT_CONFIG: /etc/stackbot/config.yaml
+    volumes:
+      - ./config.yaml:/etc/stackbot/config.yaml:ro
+      - workspaces:/var/lib/stackbot/workspaces
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  workspaces:
