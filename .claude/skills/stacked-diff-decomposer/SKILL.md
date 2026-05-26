@@ -1,6 +1,6 @@
 ---
 name: stacked-diff-decomposer
-description: Decompose a completed git feature branch into a stack of dependent branches (feature-branch-1, feature-branch-2, etc.) where each branch adds exactly one logical commit on top of the previous one, suitable for review as a series of small stacked pull requests. Use this skill whenever the user wants to break down a large feature branch into smaller reviewable pieces, prepare stacked diffs or stacked PRs, split a big change into a review-friendly sequence, or restructure a feature branch before opening pull requests. Trigger on phrases like "decompose this branch", "break this into a stacked diff", "split this PR", "make this reviewable", "stack this up", or when the user references preparing a feature branch for review. Also produces a stack manifest JSON file describing the stack for downstream Azure DevOps tooling.
+description: Decompose a completed git feature branch into a stack of dependent branches (feature-branch-stacked-1, feature-branch-stacked-2, etc.) where each branch adds exactly one logical commit on top of the previous one, suitable for review as a series of small stacked pull requests. Use this skill whenever the user wants to break down a large feature branch into smaller reviewable pieces, prepare stacked diffs or stacked PRs, split a big change into a review-friendly sequence, or restructure a feature branch before opening pull requests. Trigger on phrases like "decompose this branch", "break this into a stacked diff", "split this PR", "make this reviewable", "stack this up", or when the user references preparing a feature branch for review. Also writes a sentinel JSON file consumed by the `stack` CLI to build the manifest and open PRs.
 ---
 
 # Stacked Diff Decomposer
@@ -22,12 +22,18 @@ Do NOT trigger for:
 
 ## Inputs you need before starting
 
-Before any git operations, confirm these with the user:
+This skill is normally invoked under the hood by `stack decompose`, which writes
+a transient `CLAUDE.md.local` at the repo root pinning the inputs (prefix, branch
+suffix, input branch, base ref, sentinel path). When that file is present, read
+it and use its values without re-asking the user.
+
+When invoked directly (no `CLAUDE.md.local`), confirm these with the user:
 
 1. **The feature branch name.** The branch to be decomposed.
-2. **The base branch.** Usually `main` or `master`, but ask if unclear. The stack will be built on top of this.
-3. **The stack name prefix.** Defaults to the feature branch name itself. If the feature branch is `add-user-auth`, the stack branches will be `add-user-auth-1`, `add-user-auth-2`, etc.
-4. **Confirmation that the working tree is clean.** Run `git status` and confirm with the user before proceeding. Refuse to continue if there are uncommitted changes.
+2. **The base branch.** Usually `main` or `master`. The stack will be built on top of this.
+3. **The stack name prefix.** Defaults to the feature branch name itself. With the default branch suffix `-stacked-`, a prefix of `add-user-auth` produces `add-user-auth-stacked-1`, `add-user-auth-stacked-2`, etc.
+4. **Branch suffix.** Defaults to `-stacked-`. Branch names are `<prefix><suffix><n>`.
+5. **Confirmation that the working tree is clean.** Run `git status` and confirm with the user. Refuse to continue if there are uncommitted changes.
 
 ## Workflow overview
 
@@ -129,12 +135,12 @@ If the user wants to see the actual hunks for a proposed commit before approving
 
 Once approved, build the stack. The approach uses `git checkout` plus targeted file/hunk staging from the feature branch.
 
-For a stack of N commits with prefix `<prefix>`:
+For a stack of N commits with prefix `<prefix>` and suffix `<suffix>` (default `-stacked-`):
 
 ```bash
 # Start from the base branch
 git checkout <base-branch>
-git checkout -b <prefix>-1
+git checkout -b <prefix><suffix>1
 
 # For each commit i from 1 to N:
 #   Apply the changes for commit i from the feature branch
@@ -191,7 +197,7 @@ This is more error-prone, so when proposing commits in Phase 2, prefer splits th
 After each commit (except the last):
 
 ```bash
-git checkout -b <prefix>-<i+1>
+git checkout -b <prefix><suffix><i+1>
 ```
 
 The new branch sits on top of the previous one, so the next commit will stack naturally.
@@ -203,90 +209,58 @@ This is the critical step. After the stack is built, verify that the tip of the 
 ```bash
 # Compare trees, not commit hashes (commit hashes will differ due to different parents/messages)
 ORIGINAL_TREE=$(git rev-parse <feature-branch>^{tree})
-STACK_TIP_TREE=$(git rev-parse <prefix>-<N>^{tree})
+STACK_TIP_TREE=$(git rev-parse <prefix><suffix><N>^{tree})
 
 if [ "$ORIGINAL_TREE" = "$STACK_TIP_TREE" ]; then
   echo "VERIFIED: stack tip matches original feature branch"
 else
   echo "MISMATCH: stack does not reproduce original feature branch"
   # Show what differs
-  git diff <prefix>-<N>..<feature-branch>
+  git diff <prefix><suffix><N>..<feature-branch>
 fi
 ```
 
-If the trees match, proceed to manifest generation.
+If the trees match, proceed to sentinel generation.
 
 If the trees do NOT match, this is a hard failure. Do these steps:
 1. Report the mismatch to the user explicitly, showing the diff between the stack tip and original
-2. Hide the partial stack branches with `git hide <prefix>-1 <prefix>-2 ...` (commits remain recoverable but disappear from the smartlog)
-3. Delete the stack branch refs: `git branch -D <prefix>-1 <prefix>-2 ...`
+2. Hide the partial stack branches with `git hide <prefix><suffix>1 <prefix><suffix>2 ...` (commits remain recoverable but disappear from the smartlog)
+3. Delete the stack branch refs: `git branch -D <prefix><suffix>1 <prefix><suffix>2 ...`
 4. Tell the user the original feature branch is unchanged and the backup ref is still in place
 5. Mention that `git undo` can also walk back the operations if they prefer that path
-6. Do not attempt automatic recovery or "fix-up" commits. The decomposition failed; the user needs to know.
+6. Do not write the sentinel.
+7. Do not attempt automatic recovery or "fix-up" commits. The decomposition failed; the user needs to know.
 
-## Manifest generation
+## Sentinel generation
 
-After successful verification, write a manifest file at `.git/stack/manifests/<stack_prefix>.json` describing the stack. This file is consumed by the `stack` CLI for all post-decomposition operations. The path is per-stack so multiple stacks can coexist in the same repository; the `<stack_prefix>` portion matches the prefix used when naming branches.
+After successful verification, write a sentinel file at `.git/stack/decompose-sentinel-<stack_prefix>.json`. The presence of this file with the correct shape is the signal to the calling CLI (`stack manifest`) that decomposition succeeded. The CLI then re-reads the branches from git and constructs the manifest in Redis from authoritative git state. Do not write any manifest file yourself.
 
 Format:
 
 ```json
 {
-  "version": 1,
-  "created_at": "<ISO 8601 timestamp>",
-  "base_branch": "<base-branch>",
+  "prefix": "<stack_prefix>",
+  "branches": ["<prefix><suffix>1", "<prefix><suffix>2", "..."],
   "base_ref": "<base-branch>",
-  "original_feature_branch": "<feature-branch>",
-  "original_tip_commit": "<full sha>",
-  "stack_prefix": "<prefix>",
-  "branches": [
-    {
-      "order": 1,
-      "name": "<prefix>-1",
-      "commit_sha": "<full sha>",
-      "commit_subject": "<subject line>",
-      "commit_body": "<body or empty string>",
-      "parent_branch": "<base-branch>",
-      "files_changed": ["path/to/file1", "path/to/file2"]
-    },
-    {
-      "order": 2,
-      "name": "<prefix>-2",
-      "commit_sha": "<full sha>",
-      "commit_subject": "<subject line>",
-      "commit_body": "<body or empty string>",
-      "parent_branch": "<prefix>-1",
-      "files_changed": ["path/to/file3"]
-    }
-  ],
-  "verification": {
-    "passed": true,
-    "method": "tree-hash-equality",
-    "original_tree": "<tree sha>",
-    "stack_tip_tree": "<tree sha>"
-  }
+  "source_branch": "<feature-branch>",
+  "source_branch_tip": "<full sha>",
+  "branch_suffix": "<suffix>",
+  "completion_timestamp": "<ISO 8601 UTC, e.g. 2026-05-25T14:23:11Z>"
 }
 ```
 
-The manifest is the contract with downstream tooling. Do not write it unless verification passed. The presence of this file with `verification.passed: true` is what the Azure DevOps tooling will check before pushing branches and creating PRs.
+Do not write the sentinel unless tree-hash verification passed. The CLI re-runs the tree-hash check (defense-in-depth) against the recorded branches before writing the manifest to Redis, so a malformed sentinel cannot slip through, but you should still refuse to write one when verification fails locally.
 
-The `stack` CLI may add the following fields on first use; the decomposer omits them:
-
-- `root_pr_id` / `root_pr_url` (top-level): the canonical root PR for the stack, set once on first `stack push` and preserved across `stack land`.
-- `pr_id` / `pr_url` (per-branch): the PR for each branch, set on `stack push`.
-- `last_update` (top-level): records the most recent `stack update`.
-- `verification.current_stack_tip_tree` / `verification.last_verified_at`: refreshed on each `stack update` and `stack sync`.
-
-For the full schema specification including all field constraints and a worked example, see `references/manifest-schema.md`.
+Create the parent directory if needed: `mkdir -p .git/stack`. The file is gitignored by the CLI's own `.gitignore` entries.
 
 ## Final report to user
 
 After everything succeeds, tell the user:
 - The list of branches created, in order
 - The backup ref name in case they want to revert
-- That the manifest was written to `.git/stack/manifests/<stack_prefix>.json`
+- That the sentinel was written to `.git/stack/decompose-sentinel-<stack_prefix>.json`
 - A visual view of the result by running `git branchless smartlog` (often aliased as `git sl`, but do not assume the alias exists), which shows the stack structure at a glance
-- A suggested next step: review the stack contents with `git log --oneline --graph <prefix>-1..<prefix>-N` or visually with `git branchless smartlog`
+- The CLI's next step (when invoked under `stack decompose`, this happens automatically): `stack manifest --prefix <stack_prefix>` builds the manifest in Redis; `stack publish --prefix <stack_prefix>` pushes branches and opens PRs.
 
 Do not push the branches. Do not delete the original feature branch. The user keeps full control over what happens next.
 
