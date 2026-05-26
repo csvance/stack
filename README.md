@@ -10,20 +10,36 @@ stack and manifest. Everything afterward (rebuild after edits, push to
 DevOps, sync onto a moved base, drop a merged bottom PR) is deterministic
 and lives here.
 
+Target environment: Linux, with `~/.local/bin` on every user's `PATH`.
+
 ## Prerequisites
 
-- bash 4.0 or newer (Linux ships this; on macOS `brew install bash` and make
-  sure the brewed bash is on `PATH` before `/bin/bash`)
+- `bash` 4 or newer (ships with every supported distribution)
 - `git`
 - `jq`
 - [`git-branchless`](https://github.com/arxanas/git-branchless), initialized
   in the repo (`git branchless init`)
 - Azure CLI (`az`) with the `azure-devops` extension, signed in via
-  `az login`
-- PyCharm with the JetBrains command-line launcher available as `pycharm`
-  on `PATH` (or installed in a standard Linux / macOS location; see
-  `install.sh` for the discovery list). PyCharm is used as the three-way
-  merge tool for conflict resolution.
+  `az login` (Azure DevOps cloud) or `az devops login --organization
+  <org-url>` with a PAT (Azure DevOps Server / on-prem). The PAT needs
+  one scope: **Code (read & write)**. This single scope covers everything
+  the CLI does:
+
+  | Operation                                | API surface           |
+  | ---------------------------------------- | --------------------- |
+  | `git push` over HTTPS                    | Code (write)          |
+  | `az repos show` (preflight reachability) | Code (read)           |
+  | `az repos pr list` / `show`              | Code (read)           |
+  | `az repos pr create` / `update`          | Code (write)          |
+
+  No other scopes are required: the CLI does not post PR comments, set
+  commit statuses, or read work items. You do not need to set a default
+  organization (`az devops configure --defaults organization=...`); the
+  CLI parses the origin remote and passes `--organization` explicitly on
+  every call.
+- PyCharm with a `pycharm` shell script on `PATH`. See "JetBrains Toolbox"
+  below for the recommended setup. PyCharm is used as the three-way merge
+  tool for conflict resolution.
 
 ## Install
 
@@ -35,12 +51,44 @@ tools/stack/install.sh
 
 The installer symlinks `tools/stack/bin/stack` into `~/.local/bin` (override
 with `STACK_INSTALL_DIR=...`) and probes each prerequisite, printing a
-one-line install hint for anything missing. If `~/.local/bin` is not on your
-`PATH`, the installer prints the `export PATH=...` snippet you need to add
-to your shell rc.
+one-line install hint for anything missing. Because `~/.local/bin` is on
+every user's `PATH` at this company, the `stack` command is available in a
+new shell immediately after install.
 
 `tools/stack/uninstall.sh` removes the symlink it created. It refuses to
 touch anything else.
+
+## JetBrains Toolbox: shell scripts in `~/.local/bin`
+
+PyCharm ships a small command-line launcher script that the `stack` CLI
+invokes as `pycharm` for three-way merges. The cleanest way to install and
+maintain this launcher on Linux is through **JetBrains Toolbox**, which can
+generate the script in `~/.local/bin` and keep it in sync with the
+installed IDE version as you upgrade.
+
+One-time setup (per user):
+
+1. Open **Toolbox** and click the gear icon at the top right, then
+   **Settings**.
+2. Under **Tools**, enable **Generate shell scripts**.
+3. Set **Shell scripts location** to `~/.local/bin`.
+4. Leave **Shell script name** at its default (lowercase IDE name, so
+   `pycharm` for PyCharm Professional/Community).
+5. In the IDE's individual settings inside Toolbox, make sure
+   **Shell script** is enabled.
+
+Verify:
+
+```
+command -v pycharm
+pycharm --version
+```
+
+Because `~/.local/bin` is already on every user's `PATH`, no shell-rc
+changes are needed. Toolbox refreshes the script whenever PyCharm updates,
+so the launcher stays current without manual intervention. The same
+mechanism works for any other JetBrains IDE if you ever switch the merge
+tool (IntelliJ, GoLand, WebStorm).
 
 ## Subcommands
 
@@ -109,14 +157,14 @@ subcommands):
 
 Drift classes:
 
-| Class | Meaning |
-|---|---|
-| `MISSING_BRANCH` | manifest names a branch with no local ref |
-| `BRANCH_MOVED` | local SHA differs from recorded `commit_sha` |
-| `PARENT_DRIFT` | actual parent commit != recorded parent's SHA |
-| `BASE_MOVED` | resolved `base_ref` != recorded `base_branch` |
-| `UNCOMMITTED_AHEAD` | current branch has commits beyond recorded (input to `stack update`) |
-| `PR_MERGED_BOTTOM` | bottom PR is `completed` (input to `stack land`) |
+| Class               | Meaning                                                                |
+| ------------------- | ---------------------------------------------------------------------- |
+| `MISSING_BRANCH`    | manifest names a branch with no local ref                              |
+| `BRANCH_MOVED`      | local SHA differs from recorded `commit_sha`                           |
+| `PARENT_DRIFT`      | actual parent commit != recorded parent's SHA                          |
+| `BASE_MOVED`        | resolved `base_ref` != recorded `base_branch`                          |
+| `UNCOMMITTED_AHEAD` | current branch has commits beyond recorded (input to `stack update`)   |
+| `PR_MERGED_BOTTOM`  | bottom PR is `completed` (input to `stack land`)                       |
 
 ## Backup snapshots
 
