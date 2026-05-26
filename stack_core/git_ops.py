@@ -192,6 +192,34 @@ def branchless_abort(cwd: Path | str) -> None:
         _run(["git", "merge", "--abort"], cwd, check=False)
 
 
+def clone(
+    url: str,
+    dest: Path | str,
+    *,
+    extra_headers: dict[str, str] | None = None,
+    depth: int | None = None,
+) -> None:
+    """Clone ``url`` into ``dest``. Optional ``extra_headers`` are passed as
+    ``http.extraHeader`` git config values (used for ADO PAT auth)."""
+    args = ["git"]
+    for name, value in (extra_headers or {}).items():
+        args.extend(["-c", f"http.extraHeader={name}: {value}"])
+    args.append("clone")
+    if depth is not None:
+        args.extend(["--depth", str(depth)])
+    args.extend([url, str(dest)])
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise GitError(args, result.stderr, result.returncode)
+
+
+def fetch(cwd: Path | str, remote: str, ref: str | None = None) -> None:
+    args = ["fetch", remote]
+    if ref is not None:
+        args.append(ref)
+    _git(args, cwd)
+
+
 def worktree_add_detached(cwd: Path | str, path: Path | str, rev: str) -> None:
     _git(["worktree", "add", "--detach", str(path), rev], cwd)
 

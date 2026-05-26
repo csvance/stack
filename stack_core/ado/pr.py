@@ -7,7 +7,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from stack_core.ado.client import AdoClient
-from stack_core.ado.urls import API_VERSION, pr_list_path, pr_path, pr_web_url
+from stack_core.ado.urls import (
+    API_VERSION,
+    pr_label_path,
+    pr_labels_path,
+    pr_list_path,
+    pr_path,
+    pr_threads_path,
+    pr_web_url,
+)
 
 PrStatus = Literal["active", "completed", "abandoned"]
 
@@ -113,3 +121,64 @@ def update(
         body["status"] = status
     response = client.patch(pr_path(project, repo, pr_id), body, **{"api-version": API_VERSION})
     return PullRequest.from_api(response.json(), organization_url, project, repo)
+
+
+def add_comment(
+    client: AdoClient,
+    project: str,
+    repo: str,
+    pr_id: int,
+    content: str,
+    *,
+    organization_url: str,
+) -> int:
+    """Post a single-comment thread on the PR. Returns the new thread id."""
+    body = {
+        "comments": [{"parentCommentId": 0, "content": content, "commentType": "text"}],
+        "status": "active",
+    }
+    response = client.post(
+        pr_threads_path(project, repo, pr_id), body, **{"api-version": API_VERSION}
+    )
+    return int(response.json()["id"])
+
+
+def add_label(
+    client: AdoClient,
+    project: str,
+    repo: str,
+    pr_id: int,
+    label: str,
+    *,
+    organization_url: str,
+) -> None:
+    client.post(
+        pr_labels_path(project, repo, pr_id),
+        {"name": label},
+        **{"api-version": API_VERSION},
+    )
+
+
+def remove_label(
+    client: AdoClient,
+    project: str,
+    repo: str,
+    pr_id: int,
+    label: str,
+    *,
+    organization_url: str,
+) -> None:
+    client.delete(pr_label_path(project, repo, pr_id, label), **{"api-version": API_VERSION})
+
+
+def list_labels(
+    client: AdoClient,
+    project: str,
+    repo: str,
+    pr_id: int,
+    *,
+    organization_url: str,
+) -> list[str]:
+    response = client.get(pr_labels_path(project, repo, pr_id), **{"api-version": API_VERSION})
+    payload = response.json()
+    return [item["name"] for item in payload.get("value", [])]

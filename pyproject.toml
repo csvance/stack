@@ -15,6 +15,8 @@ dependencies = [
     "typer>=0.12",
     "omegaconf>=2.3",
     "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -30,15 +32,16 @@ dev = [
 
 [project.scripts]
 stack = "stack_cli.main:app"
+stackbot = "stack_bot.main:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["stack_core", "stack_cli"]
+packages = ["stack_core", "stack_cli", "stack_bot"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "stack_core/share" = "stack_core/share"
 
 [tool.hatch.build.targets.sdist]
-include = ["stack_core", "stack_cli", "tests", "pyproject.toml", "README.md"]
+include = ["stack_core", "stack_cli", "stack_bot", "tests", "pyproject.toml", "README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,7 +53,7 @@ markers = [
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["stack_core", "stack_cli"]
+files = ["stack_core", "stack_cli", "stack_bot"]
 plugins = ["pydantic.mypy"]
 
 [tool.ruff]
@@ -75,3 +78,4 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]
 "stack_cli/**" = ["B008"]   # typer pattern: Option(...) as default value
+"stack_bot/**" = ["B008"]   # fastapi pattern: Depends(...) as default value

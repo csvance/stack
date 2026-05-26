@@ -94,3 +94,16 @@ class SentinelMissing(DecomposeError):
 
 class PublishError(CreateError):
     pass
+
+
+class LandError(StackError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"land error: {reason}")
+        self.reason = reason
+
+
+class LandConflict(StackError):
+    def __init__(self, conflicting_paths: list[str]) -> None:
+        files = ", ".join(conflicting_paths) if conflicting_paths else "<unknown>"
+        super().__init__(f"branchless move conflicted on: {files}")
+        self.conflicting_paths = conflicting_paths

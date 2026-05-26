@@ -71,6 +71,9 @@ class AdoClient:
     def patch(self, path: str, json: dict[str, Any], **params: Any) -> httpx.Response:
         return self._request("PATCH", path, params=params, json=json)
 
+    def delete(self, path: str, **params: Any) -> httpx.Response:
+        return self._request("DELETE", path, params=params)
+
     def _request(
         self,
         method: str,
