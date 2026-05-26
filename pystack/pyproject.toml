@@ -22,13 +22,17 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "fakeredis>=2.20",
+    "respx>=0.21",
     "mypy>=1.10",
     "ruff>=0.5",
     "pre-commit>=3.7",
 ]
 
+[project.scripts]
+pystack = "stack_cli.main:app"
+
 [tool.hatch.build.targets.wheel]
-packages = ["stack_core"]
+packages = ["stack_core", "stack_cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -40,7 +44,7 @@ markers = [
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["stack_core"]
+files = ["stack_core", "stack_cli"]
 plugins = ["pydantic.mypy"]
 
 [tool.ruff]
@@ -64,3 +68,4 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]
+"stack_cli/**" = ["B008"]   # typer pattern: Option(...) as default value

@@ -114,6 +114,19 @@ def files_changed(cwd: Path | str, rev_a: str, rev_b: str) -> list[str]:
     return out.splitlines()
 
 
+def remote_url(cwd: Path | str, remote: str = "origin") -> str:
+    """Return the configured URL for the given git remote."""
+    return _git(["remote", "get-url", remote], cwd)
+
+
+def current_branch(cwd: Path | str) -> str | None:
+    """Return the currently checked-out branch name, or ``None`` if HEAD is detached."""
+    result = _run(["git", "symbolic-ref", "--short", "--quiet", "HEAD"], cwd, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.rstrip("\n") or None
+
+
 def working_tree_clean(cwd: Path | str) -> bool:
     """Clean working tree AND no in-progress rebase/merge/cherry-pick/revert."""
     porcelain = _git(["status", "--porcelain", "--untracked-files=no"], cwd)
