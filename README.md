@@ -70,6 +70,15 @@ ruff check .
 
 - `stack_core/` — pure library: types, manifest helpers, topology, Redis state store, git wrappers, ADO client, drift detection, verify, PR templates, per-operation business logic.
 - `stack_cli/` — Typer-based command line. Imports from `stack_core` and renders results.
+- `stack_bot/` — async FastAPI shell that receives Azure DevOps webhooks and drives `stack_core` operations as background tasks.
 - `tests/unit/` — unit tests with mocked redis (fakeredis) and ADO (respx). Fast.
 - `tests/integration/` — exercises multiple modules together. Slower.
 - `.claude/skills/stacked-diff-decomposer/` — Claude Code skill invoked by `stack decompose`.
+
+## Concurrency model
+
+`stack_core` and `stack_cli` are pure sync. The CLI calls into core directly, and Redis, ADO HTTP, and git subprocess work are all blocking by design.
+
+`stack_bot` is the only async surface. Route handlers and background tasks are `async def`, and they bridge to sync core code via `asyncio.to_thread` at the I/O boundary (see `stack_bot/webhooks/ado.py`, `stack_bot/handlers/land.py`, `stack_bot/notifications.py`, `stack_bot/workspace_mgr.py`). Core modules are never forked into async variants.
+
+New bot code that does I/O should follow the same rule: wrap the sync core call at the boundary with `asyncio.to_thread`, and do not introduce parallel async versions of `stack_core` modules. This keeps the "color of functions" boundary at one well-defined seam.
